@@ -1,0 +1,200 @@
+{
+  "smes": [
+    {
+      "id": "sme-001",
+      "name": "Dr. Thabo Mthembu",
+      "email": "thabo.mthembu@email.com",
+      "role": "Senior Facilitator & Assessor",
+      "specializations": ["Business Management", "Leadership Development", "Project Management"],
+      "sectors": ["Manufacturing", "Services", "Mining"],
+      "location": "Johannesburg, Gauteng",
+      "experience": "15+ years",
+      "qualifications": [
+        "PhD in Business Administration",
+        "ETDP SETA Registered Facilitator",
+        "PMP Certified Project Manager",
+        "NQF Level 8 Qualification"
+      ],
+      "rates": {
+        "facilitation": "R1,500/day",
+        "assessment": "R800/day",
+        "consultation": "R1,200/day"
+      },
+      "availability": "Available",
+      "rating": 0.0,
+      "reviews": 0,
+      "verified": true,
+      "profileImage": "/images/profile-1.jpg",
+      "aboutMe": "Experienced facilitator with a passion for developing leadership capabilities in emerging managers. Specializes in competency-based training and assessment.",
+      "testimonials": [
+        {
+          "client": "TechSkills Academy",
+          "rating": 5,
+          "comment": "Dr. Mthembu's facilitation skills are exceptional. Our learners consistently achieve high pass rates."
+        }
+      ]
+    },
+    {
+      "id": "sme-002",
+      "name": "Ms. Sarah Ndlovu",
+      "email": "sarah.ndlovu@email.com",
+      "role": "Skills Development Consultant",
+      "specializations": ["Human Resources", "Skills Development", "Training Design"],
+      "sectors": ["Healthcare", "Education", "Government"],
+      "location": "Cape Town, Western Cape",
+      "experience": "12+ years",
+      "qualifications": [
+        "Master's in Human Resource Development",
+        "HWSETA Registered Assessor",
+        "Skills Development Facilitator",
+        "SAQA Unit Standard Aligned"
+      ],
+      "rates": {
+        "facilitation": "R1,200/day",
+        "assessment": "R700/day",
+        "consultation": "R1,000/day"
+      },
+      "availability": "Available",
+      "rating": 0.0,
+      "reviews": 0,
+      "verified": true,
+      "profileImage": "/images/profile-2.jpg",
+      "aboutMe": "Dedicated to empowering individuals and organizations through strategic skills development initiatives. Expert in curriculum design and learner assessment."
+    },
+    {
+      "id": "sme-003",
+      "name": "Mr. James Roberts",
+      "email": "james.roberts@email.com",
+      "role": "Technical Assessor & Moderator",
+      "specializations": ["Information Technology", "Digital Literacy", "Systems Analysis"],
+      "sectors": ["Technology", "Finance", "Telecommunications"],
+      "location": "Durban, KwaZulu-Natal",
+      "experience": "10+ years",
+      "qualifications": [
+        "BSc Computer Science Honours",
+        "MICT SETA Registered",
+        "CompTIA Certified Trainer",
+        "Microsoft Certified Educator"
+      ],
+      "rates": {
+        "facilitation": "R1,800/day",
+        "assessment": "R900/day",
+        "moderation": "R1,100/day"
+      },
+      "availability": "Limited",
+      "rating": 0.0,
+      "reviews": 0,
+      "verified": true,
+      "profileImage": "/images/profile-3.jpg",
+      "aboutMe": "Technology professional with extensive experience in developing and assessing digital skills programs for the modern workplace."
+    }
+  ],
+  "sdps": [
+    {
+      "id": "sdp-001",
+      "name": "Skills Development Institute",
+      "email": "admin@sdi.co.za",
+      "type": "Private Training Provider",
+      "accreditation": "ETDP SETA Accredited",
+      "sectors": ["Business", "Management", "Leadership"],
+      "location": "Johannesburg, Gauteng",
+      "establishedYear": "2015",
+      "learners": "2,500+ annually",
+      "verified": true,
+      "assessmentCentre": true,
+      "aboutUs": "Leading provider of business and management skills development programs, specializing in NQF aligned qualifications.",
+      "services": [
+        "Learnerships",
+        "Skills Programmes",
+        "Short Courses",
+        "Assessment Services"
+      ]
+    },
+    {
+      "id": "sdp-002",
+      "name": "TechAdvance Training",
+      "email": "info@techadvance.co.za",
+      "type": "Technology Training Provider",
+      "accreditation": "MICT SETA Accredited",
+      "sectors": ["Information Technology", "Digital Media", "Telecommunications"],
+      "location": "Cape Town, Western Cape",
+      "establishedYear": "2018",
+      "learners": "1,800+ annually",
+      "verified": true,
+      "assessmentCentre": false,
+      "aboutUs": "Innovative technology training provider focused on digital transformation and emerging technologies."
+    }
+  ],
+  "engagements": [
+    {
+      "id": "eng-001",
+      "sdp": "Skills Development Institute",
+      "sme": "Dr. Thabo Mthembu",
+      "type": "Assessment Accreditation",
+      "status": "In Progress",
+      "startDate": "2025-07-15",
+      "endDate": "2025-07-30",
+      "fee": "R2,500",
+      "description": "Assessment and accreditation for Business Management Learnership Level 4"
+    },
+    {
+      "id": "eng-002",
+      "sdp": "TechAdvance Training",
+      "sme": "Mr. James Roberts",
+      "type": "Facilitation",
+      "status": "Completed",
+      "startDate": "2025-07-01",
+      "endDate": "2025-07-10",
+      "fee": "R2,500",
+      "description": "Digital Literacy Skills Programme facilitation"
+    }
+  ],
+  "pricing": {
+    "sme": {
+      "verification": {
+        "amount": 100,
+        "currency": "ZAR",
+        "description": "One-time verification fee for SME credentials"
+      },
+      "listing": {
+        "monthly": {
+          "amount": 69,
+          "currency": "ZAR",
+          "description": "Monthly listing fee"
+        },
+        "annual": {
+          "amount": 699,
+          "currency": "ZAR",
+          "description": "Annual listing fee (save R129)"
+        }
+      }
+    },
+    "sdp": {
+      "verification": {
+        "amount": 250,
+        "currency": "ZAR",
+        "description": "One-time verification fee for SDP accreditation"
+      },
+      "listing": {
+        "annual": {
+          "amount": 699,
+          "currency": "ZAR",
+          "description": "Annual listing fee"
+        }
+      },
+      "assessmentCentre": {
+        "monthly": {
+          "amount": 99,
+          "currency": "ZAR",
+          "description": "Assessment Centre add-on per month"
+        }
+      }
+    },
+    "engagement": {
+      "baseAmount": 2500,
+      "platformFee": 10,
+      "currency": "ZAR",
+      "description": "Standard accreditation engagement fee with 10% platform fee"
+    }
+  }
+}

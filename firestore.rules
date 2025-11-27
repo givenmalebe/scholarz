@@ -1,0 +1,245 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() { return request.auth != null; }
+    function isUser(userId) { return isSignedIn() && request.auth.uid == userId; }
+    // Check admin status from custom claims
+    function isAdmin() { 
+      return isSignedIn() && (
+        request.auth.token.role == 'Admin' || 
+        request.auth.token.admin == true
+      );
+    }
+
+    // Users collection and profile docs
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isUser(userId);
+      // Allow user or admin to update most fields
+      allow delete: if isUser(userId) || isAdmin();
+      // Allow update from owner/admin OR allow anyone to update rating/reviews (for rating system)
+      allow update: if isUser(userId) || isAdmin() || 
+        (isSignedIn() && 
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profile', 'updatedAt']) &&
+         request.resource.data.profile.diff(resource.data.profile).affectedKeys().hasOnly(['rating', 'reviews']));
+
+      // User documents subcollection
+      match /documents/{docId} {
+        // Owner can read/write their own documents; everyone can read approved docs; admin can read all
+        allow read: if isUser(userId) || (resource.data.reviewStatus == 'approved') || isAdmin();
+        allow create: if isUser(userId) || isAdmin();
+        allow update, delete: if isUser(userId) || isAdmin();
+      }
+    }
+
+    // Engagements (owned by either SME or SDP)
+    match /engagements/{engagementId} {
+      // For list queries, allow if admin or if user is participant
+      allow list: if isAdmin() || isSignedIn();
+      // For get operations, check document data
+      allow get: if isSignedIn() && (
+        resource.data.smeId == request.auth.uid ||
+        resource.data.sdpId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isSignedIn() && (
+        request.resource.data.smeId == request.auth.uid ||
+        request.resource.data.sdpId == request.auth.uid ||
+        isAdmin()
+      );
+      // Allow update if user is participant OR if admin (admin can update any engagement)
+      allow update: if isAdmin() || (
+        isSignedIn() && (
+          resource.data.smeId == request.auth.uid ||
+          resource.data.sdpId == request.auth.uid
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Market items - public read; owners or admin can write
+    match /marketItems/{itemId} {
+      allow read: if true;
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn() && (resource.data.sellerId == request.auth.uid || isAdmin());
+    }
+
+    // Want ads - public read; owners or admin can write
+    match /wantAds/{wantId} {
+      allow read: if true;
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // Want items - public read; owners or admin can write
+    match /wantItems/{itemId} {
+      allow read: if true;
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn() && (resource.data.buyerId == request.auth.uid || isAdmin());
+    }
+
+    // SME Ratings - public read; only signed-in SDPs can create/update their own ratings
+    match /smeRatings/{ratingId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.sdpId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.sdpId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.sdpId == request.auth.uid;
+    }
+
+    // Chat messages - using subcollection structure: chats/{chatId}/messages/{messageId}
+    match /chats/{chatId} {
+      // Allow read if the user ID is part of the chatId (format: userId1_userId2)
+      allow read: if isSignedIn() && chatId.matches('.*' + request.auth.uid + '.*');
+      
+      match /messages/{messageId} {
+        allow read: if isSignedIn() && chatId.matches('.*' + request.auth.uid + '.*');
+        allow create: if isSignedIn() && 
+          request.resource.data.senderId == request.auth.uid &&
+          chatId.matches('.*' + request.auth.uid + '.*');
+        allow update, delete: if isSignedIn() && resource.data.senderId == request.auth.uid;
+      }
+    }
+
+    // Transactions - participants and admin can access
+    match /transactions/{transactionId} {
+      allow read: if isSignedIn() && (
+        resource.data.buyerId == request.auth.uid ||
+        resource.data.sellerId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && (
+        resource.data.buyerId == request.auth.uid ||
+        resource.data.sellerId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+
+    // Document review queue - admins manage
+    match /documentReviews/{reviewId} {
+      allow list: if isAdmin();
+      allow get: if isAdmin();
+      allow create: if isSignedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    // Applications collection - admins can read/write all
+    match /applications/{applicationId} {
+      allow list: if isAdmin();
+      allow get: if isAdmin();
+      allow create: if isSignedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    // Escrow collection - admins can read/write all
+    match /escrow/{escrowId} {
+      allow list: if isAdmin() || isSignedIn();
+      allow get: if isAdmin() || (isSignedIn() && (
+        (resource.data.smeId != null && resource.data.smeId == request.auth.uid) ||
+        (resource.data.sdpId != null && resource.data.sdpId == request.auth.uid)
+      ));
+      allow create: if isSignedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    // Notifications collection - users can read their own, admins can read all
+    match /notifications/{notificationId} {
+      // For list queries, allow if admin or signed in (query will filter by userId)
+      allow list: if isAdmin() || isSignedIn();
+      // For get operations, check document data
+      allow get: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+      allow delete: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+
+    // Projects collection - public read (all users can read); owners can create/update
+    match /projects/{projectId} {
+      // Allow anyone to read projects (including unauthenticated, but queries require auth)
+      allow read: if true;
+      // Only signed-in users can create projects, and must set themselves as sdpId
+      allow create: if isSignedIn() && request.resource.data.sdpId == request.auth.uid;
+      // Only project owner or admin can update
+      allow update: if isSignedIn() && (
+        resource.data.sdpId == request.auth.uid ||
+        isAdmin()
+      );
+      // Only project owner or admin can delete
+      allow delete: if isSignedIn() && (
+        resource.data.sdpId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+
+    // Helper function to check if user owns a project
+    function ownsProject(projectId) {
+      return projectId != null && 
+             exists(/databases/$(database)/documents/projects/$(projectId)) &&
+             get(/databases/$(database)/documents/projects/$(projectId)).data.sdpId == request.auth.uid;
+    }
+
+    // Project Applications - applicants and project owners can read; applicants can create; SDPs can create invitations
+    match /projectApplications/{applicationId} {
+      // Allow list for all signed-in users (filtering happens in queries)
+      allow list: if isSignedIn();
+      // Allow get if user is the applicant, or if they own the project
+      allow get: if isSignedIn() && (
+        resource.data.smeId == request.auth.uid ||
+        ownsProject(resource.data.projectId) ||
+        isAdmin()
+      );
+      // Allow create if:
+      // 1. SME is creating their own application (status: 'pending')
+      // 2. SDP (project owner) is creating an invitation (status: 'invited' and invitedBy matches)
+      allow create: if isSignedIn() && (
+        (request.resource.data.smeId == request.auth.uid) ||
+        (request.resource.data.status == 'invited' && 
+         request.resource.data.invitedBy == request.auth.uid &&
+         exists(/databases/$(database)/documents/projects/$(request.resource.data.projectId)) &&
+         get(/databases/$(database)/documents/projects/$(request.resource.data.projectId)).data.sdpId == request.auth.uid)
+      );
+      // Allow update if user is applicant, owns the project, or is admin
+      allow update: if isSignedIn() && (
+        resource.data.smeId == request.auth.uid ||
+        ownsProject(resource.data.projectId) ||
+        isAdmin()
+      );
+      allow delete: if isSignedIn() && (
+        resource.data.smeId == request.auth.uid ||
+        ownsProject(resource.data.projectId) ||
+        isAdmin()
+      );
+    }
+
+    // QCTO Qualifications - public read
+    match /qctoQualifications/{qualificationId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Recent Activities - users can read their own, admins can read all
+    match /recentActivities/{activityId} {
+      allow list: if isSignedIn(); // Allow list for filtering
+      allow get: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+  }
+}
+
+

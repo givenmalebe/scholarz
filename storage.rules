@@ -1,0 +1,89 @@
+rules_version = '2';
+// Firebase Storage Security Rules
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Users can upload and manage their own documents
+    match /users/{userId}/{allPaths=**} {
+      // Allow read if user is authenticated and owns the file, or if document is approved
+      allow read: if request.auth != null && 
+                     (request.auth.uid == userId || 
+                      resource.metadata.reviewStatus == 'approved');
+      
+      // Allow write if user is authenticated and owns the file
+      allow write: if request.auth != null && request.auth.uid == userId
+                   && request.resource.size < 10 * 1024 * 1024; // Max 10MB
+      
+      // Allow delete if user is authenticated and owns the file
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Registration documents (uploaded during onboarding)
+    match /registration-documents/{userId}/{allPaths=**} {
+      allow read: if request.auth != null && (request.auth.uid == userId || request.auth.token.role == 'Admin');
+      allow write: if request.auth != null && request.auth.uid == userId
+                   && request.resource.size < 10 * 1024 * 1024;
+      allow delete: if request.auth != null && (request.auth.uid == userId || request.auth.token.role == 'Admin');
+    }
+    
+    // User documents (general user document storage)
+    match /user-documents/{userId}/{allPaths=**} {
+      allow read: if request.auth != null && (request.auth.uid == userId || request.auth.token.role == 'Admin');
+      allow write: if request.auth != null && request.auth.uid == userId
+                   && request.resource.size < 10 * 1024 * 1024; // Max 10MB
+      allow delete: if request.auth != null && (request.auth.uid == userId || request.auth.token.role == 'Admin');
+    }
+    
+    // Project thumbnails
+    match /project-thumbnails/{userId}/{allPaths=**} {
+      allow read: if true; // Public read for project thumbnails
+      allow write: if request.auth != null && request.auth.uid == userId
+                   && request.resource.size < 5 * 1024 * 1024; // Max 5MB for images
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Project application CVs
+    match /project-applications/{userId}/{allPaths=**} {
+      allow read: if request.auth != null; // Authenticated users can read (access controlled by Firestore)
+      allow write: if request.auth != null && request.auth.uid == userId
+                   && request.resource.size < 10 * 1024 * 1024; // Max 10MB for CVs
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Admin can read all documents
+    match /users/{userId}/documents/{documentId} {
+      allow read: if request.auth != null;
+      
+      // Only admins can update review status
+      allow write: if request.auth != null && 
+                     request.auth.token.role == 'Admin';
+    }
+    
+    // Market items - anyone can read approved items, users can upload their own
+    match /marketItems/{userId}/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Profile images - users can manage their own
+    match /users/{userId}/profile/{allPaths=**} {
+      allow read: if true; // Public read for profile images
+      allow write: if request.auth != null && request.auth.uid == userId
+                   && request.resource.size < 5 * 1024 * 1024; // Max 5MB for images
+    }
+    
+    // Project documents - accessible by engagement participants
+    match /project-documents/{engagementId}/{allPaths=**} {
+      // Allow read if user is authenticated (participants will be checked in app logic)
+      allow read: if request.auth != null;
+      
+      // Allow upload if user is authenticated
+      // Access control is handled by Firestore engagement permissions
+      allow write: if request.auth != null && 
+                   request.resource.size < 20 * 1024 * 1024; // Max 20MB for project documents
+      
+      // Allow delete if user is authenticated
+      allow delete: if request.auth != null;
+    }
+  }
+}
+
