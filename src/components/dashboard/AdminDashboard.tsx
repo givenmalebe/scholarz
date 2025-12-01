@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Users,
@@ -13,6 +13,7 @@ import {
   Filter,
   Download,
   Eye,
+  User,
   UserPlus,
   Activity,
   Shield,
@@ -30,12 +31,26 @@ import {
   FolderOpen,
   X,
   Gavel,
-  MessageSquare
+  MessageSquare,
+  Check,
+  X as XIcon,
+  BookOpen,
+  Plus,
+  Edit,
+  Trash2,
+  EyeOff,
+  Sparkles,
+  Loader2,
+  Upload,
+  Image as ImageIcon,
+  ExternalLink
 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
-import { db, isFirebaseConfigured } from '../../firebase/config';
-import { collection, getDocs, onSnapshot, query, where, doc, updateDoc, Timestamp, addDoc, orderBy, limit, getDoc } from 'firebase/firestore';
+import { db, isFirebaseConfigured, storage, isStorageConfigured } from '../../firebase/config';
+import { collection, getDocs, onSnapshot, query, where, doc, updateDoc, Timestamp, addDoc, orderBy, limit, getDoc, deleteDoc } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { Blog } from '../../types';
 import { createNotification } from '../../utils/notifications';
 import { httpsCallable } from 'firebase/functions';
 import { functions } from '../../firebase/config';
@@ -46,7 +61,7 @@ interface AdminDashboardProps {
   user: any;
 }
 
-type ViewType = 'overview' | 'applications' | 'smes' | 'sdps' | 'engagements' | 'escrow' | 'analytics' | 'documents' | 'disputes' | 'payments';
+type ViewType = 'overview' | 'applications' | 'smes' | 'sdps' | 'engagements' | 'escrow' | 'analytics' | 'documents' | 'disputes' | 'payments' | 'blogs';
 
 type ApplicationType = 'registration' | 'verification' | 'subscription' | 'payment';
 
@@ -56,6 +71,54 @@ const formatDetailValue = (value?: string | number | null) => {
   const str = value.toString().trim();
   return str.length ? str : 'Not provided';
 };
+
+const maskAccountNumber = (value?: string | null) => {
+  if (!value) return 'Not provided';
+  const digits = value.replace(/\s+/g, '');
+  if (digits.length <= 4) return digits;
+  const lastFour = digits.slice(-4);
+  return `•••• ${lastFour}`;
+};
+
+const getTimestamp = (value: any) => {
+  if (!value) return 0;
+  if (typeof value === 'number') return value;
+  if (value?.toDate) {
+    const date = value.toDate();
+    return date instanceof Date ? date.getTime() : 0;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+};
+
+const formatDateTime = (value: any, fallback = 'Not available') => {
+  if (!value) return fallback;
+  const date = value?.toDate ? value.toDate() : new Date(value);
+  if (Number.isNaN(date.getTime())) return fallback;
+  return date.toLocaleString('en-ZA', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+};
+
+const isPendingReviewStatus = (status?: string | null) => {
+  if (!status) return true;
+  const normalized = status.toLowerCase();
+  return [
+    'pending',
+    'awaiting',
+    'in_review',
+    'needs_changes',
+    'require_changes',
+    'requires_attention',
+    'awaiting_review'
+  ].includes(normalized);
+};
+
+const MAX_USERS_FOR_PENDING_SCAN = 40;
 
 export function AdminDashboard({ user }: AdminDashboardProps) {
   const navigate = useNavigate();
@@ -119,6 +182,11 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       const docsSnapshot = await getDocs(collection(db, 'users', id, 'documents'));
       const documents = docsSnapshot.docs.map(doc => ({
         id: doc.id,
+        userId: id,
+        userName: userData.profile?.name || userData.profile?.companyName || userData.name || userData.email,
+        userEmail: userData.email || userData.profile?.email || '',
+        userRole: userData.role || type,
+        isQueueDoc: false,
         ...doc.data()
       }));
 
@@ -310,81 +378,183 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     setShowReviewModal(true);
   };
 
-  const handleApproveDocument = async () => {
-    if (!selectedDocument || !isFirebaseConfigured()) return;
+  const handleApproveDocument = async (docOverride?: any) => {
+    const targetDoc = docOverride || selectedDocument;
+    if (!targetDoc || !isFirebaseConfigured()) return false;
+    const approvalComment = docOverride
+      ? 'Document approved by admin'
+      : (reviewComment.trim() || 'Document approved');
 
     try {
+      setDocumentActionLoading(`approve-${targetDoc.id}`);
       // Find the document in user's documents collection using documentId
-      const documentId = selectedDocument.documentId || selectedDocument.id;
+      const documentId = targetDoc.documentId || targetDoc.id;
       
       // Update document in user's documents collection
-      const userDocRef = doc(db, 'users', selectedDocument.userId, 'documents', documentId);
+      const userDocRef = doc(db, 'users', targetDoc.userId, 'documents', documentId);
+      const reviewerName = user.profile?.name || user.profile?.companyName || user.email || 'Admin';
       await updateDoc(userDocRef, {
         reviewStatus: 'approved',
-        reviewedBy: user.profile.name,
+        status: 'approved', // Also update status field
+        reviewedBy: reviewerName,
         reviewedAt: Timestamp.now(),
-        reviewComment: reviewComment.trim() || 'Document approved'
+        reviewComment: approvalComment
       });
 
       // Update document in review queue
-      const reviewDocRef = doc(db, 'documentReviews', selectedDocument.id);
-      await updateDoc(reviewDocRef, {
-        reviewStatus: 'approved',
-        reviewedBy: user.profile.name,
-        reviewedAt: Timestamp.now(),
-        reviewComment: reviewComment.trim() || 'Document approved'
-      });
+      if (targetDoc.isQueueDoc !== false) {
+        const reviewDocRef = doc(db, 'documentReviews', targetDoc.documentReviewId || targetDoc.id);
+        const reviewerName = user.profile?.name || user.profile?.companyName || user.email || 'Admin';
+        await updateDoc(reviewDocRef, {
+          reviewStatus: 'approved',
+          status: 'approved', // Also update status field
+          reviewedBy: reviewerName,
+          reviewedAt: Timestamp.now(),
+          reviewComment: approvalComment
+        });
+      }
 
-      alert('Document approved successfully!');
-      setShowReviewModal(false);
-      setSelectedDocument(null);
-      setReviewComment('');
+      // Update local state to remove document from pending list
+      if (!docOverride) {
+        setPendingDocuments(prev => prev.filter(doc => doc.id !== targetDoc.id));
+        alert('Document approved successfully!');
+        setShowReviewModal(false);
+        setSelectedDocument(null);
+        setReviewComment('');
+      }
+      return true;
     } catch (error: any) {
       console.error('Error approving document:', error);
-      alert('Error approving document: ' + error.message);
+      if (!docOverride) {
+        alert('Error approving document: ' + error.message);
+      }
+      return false;
+    } finally {
+      setDocumentActionLoading(null);
     }
   };
 
-  const handleRejectDocument = async () => {
-    if (!selectedDocument || !isFirebaseConfigured()) {
+  const handleRejectDocument = async (docOverride?: any, customComment?: string) => {
+    const targetDoc = docOverride || selectedDocument;
+    if (!targetDoc || !isFirebaseConfigured()) {
       alert('Please provide a reason for rejection');
-      return;
+      return false;
     }
 
-    if (!reviewComment.trim()) {
+    const commentToUse = docOverride ? (customComment || '') : reviewComment.trim();
+
+    if (!commentToUse) {
       alert('Please provide a reason for rejection');
-      return;
+      return false;
     }
 
     try {
+      setDocumentActionLoading(`reject-${targetDoc.id}`);
       // Find the document in user's documents collection using documentId
-      const documentId = selectedDocument.documentId || selectedDocument.id;
+      const documentId = targetDoc.documentId || targetDoc.id;
       
       // Update document in user's documents collection
-      const userDocRef = doc(db, 'users', selectedDocument.userId, 'documents', documentId);
+      const userDocRef = doc(db, 'users', targetDoc.userId, 'documents', documentId);
+      const reviewerName = user.profile?.name || user.profile?.companyName || user.email || 'Admin';
       await updateDoc(userDocRef, {
         reviewStatus: 'rejected',
-        reviewedBy: user.profile.name,
+        status: 'rejected', // Also update status field
+        reviewedBy: reviewerName,
         reviewedAt: Timestamp.now(),
-        reviewComment: reviewComment.trim()
+        reviewComment: commentToUse
       });
 
       // Update document in review queue
-      const reviewDocRef = doc(db, 'documentReviews', selectedDocument.id);
-      await updateDoc(reviewDocRef, {
-        reviewStatus: 'rejected',
-        reviewedBy: user.profile.name,
-        reviewedAt: Timestamp.now(),
-        reviewComment: reviewComment.trim()
-      });
+      if (targetDoc.isQueueDoc !== false) {
+        const reviewDocRef = doc(db, 'documentReviews', targetDoc.documentReviewId || targetDoc.id);
+        const reviewerName = user.profile?.name || user.profile?.companyName || user.email || 'Admin';
+        await updateDoc(reviewDocRef, {
+          reviewStatus: 'rejected',
+          status: 'rejected', // Also update status field
+          reviewedBy: reviewerName,
+          reviewedAt: Timestamp.now(),
+          reviewComment: commentToUse
+        });
+      }
 
-      alert('Document rejected.');
-      setShowReviewModal(false);
-      setSelectedDocument(null);
-      setReviewComment('');
+      // Update local state to remove document from pending list
+      if (!docOverride) {
+        setPendingDocuments(prev => prev.filter(doc => doc.id !== targetDoc.id));
+        alert('Document rejected.');
+        setShowReviewModal(false);
+        setSelectedDocument(null);
+        setReviewComment('');
+      }
+      return true;
     } catch (error: any) {
       console.error('Error rejecting document:', error);
-      alert('Error rejecting document: ' + error.message);
+      if (!docOverride) {
+        alert('Error rejecting document: ' + error.message);
+      }
+      return false;
+    } finally {
+      setDocumentActionLoading(null);
+    }
+  };
+
+  const handleSelectDocumentUser = async (userRecord: any) => {
+    if (!userRecord || !userRecord.id) return;
+    setSelectedDocumentUser(userRecord);
+    setUserDocumentError(null);
+
+    const cachedDocs = userDocumentCache[userRecord.id];
+    if (cachedDocs) {
+      setUserDocumentList(cachedDocs);
+      return;
+    }
+
+    if (!isFirebaseConfigured()) {
+      setUserDocumentError('Firebase is not configured');
+      return;
+    }
+
+    setLoadingUserDocuments(true);
+    setUserDocumentList([]);
+    try {
+      const snapshot = await getDocs(collection(db, 'users', userRecord.id, 'documents'));
+      const docs = snapshot.docs.map(doc => ({
+        id: doc.id,
+        userId: userRecord.id,
+        userRole: userRecord.role || userRecord.profile?.role,
+        userName: userRecord.profile?.name || userRecord.profile?.companyName || userRecord.name || userRecord.email,
+        userEmail: userRecord.email || userRecord.profile?.email,
+        ...doc.data()
+      }));
+      docs.sort((a: any, b: any) => getTimestamp(b.uploadedAt || b.createdAt) - getTimestamp(a.uploadedAt || a.createdAt));
+      setUserDocumentList(docs);
+      setUserDocumentCache(prev => ({ ...prev, [userRecord.id]: docs }));
+    } catch (error: any) {
+      console.error('Error loading user documents:', error);
+      setUserDocumentError(error.message || 'Unable to load documents. Please try again.');
+    } finally {
+      setLoadingUserDocuments(false);
+    }
+  };
+
+  const handleApplicationDocumentDecision = async (document: any, action: 'approve' | 'reject') => {
+    if (!document) return;
+
+    if (action === 'approve') {
+      const success = await handleApproveDocument(document);
+      if (success) {
+        setApplicationDocuments(prev => prev.map(doc => doc.id === document.id ? { ...doc, reviewStatus: 'approved' } : doc));
+      }
+      return;
+    }
+
+    let reason = prompt('Please provide a reason for rejecting this document:');
+    if (!reason) return;
+    reason = reason.trim();
+    if (!reason) return;
+
+    const success = await handleRejectDocument(document, reason);
+    if (success) {
+      setApplicationDocuments(prev => prev.map(doc => doc.id === document.id ? { ...doc, reviewStatus: 'rejected' } : doc));
     }
   };
 
@@ -398,6 +568,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [recentEngagements, setRecentEngagements] = useState([]);
   const [escrowTransactions, setEscrowTransactions] = useState([]);
   const [pendingDocuments, setPendingDocuments] = useState<any[]>([]);
+  const [documentSource, setDocumentSource] = useState<'queue' | 'fallback' | null>(null);
+  const [documentQueueAvailable, setDocumentQueueAvailable] = useState(false);
+  const [scanningUserDocs, setScanningUserDocs] = useState(false);
+  const [documentScanError, setDocumentScanError] = useState<string | null>(null);
+  const [documentReviewSearch, setDocumentReviewSearch] = useState('');
+  const [documentReviewRole, setDocumentReviewRole] = useState<'all' | 'SME' | 'SDP'>('all');
   const [disputedEngagements, setDisputedEngagements] = useState<any[]>([]);
   const [selectedDispute, setSelectedDispute] = useState<any | null>(null);
   const [showDisputeModal, setShowDisputeModal] = useState(false);
@@ -407,17 +583,229 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [reviewComment, setReviewComment] = useState('');
   const [selectedDocument, setSelectedDocument] = useState<any | null>(null);
   const [showReviewModal, setShowReviewModal] = useState(false);
+  const [documentActionLoading, setDocumentActionLoading] = useState<string | null>(null);
   const [selectedApplication, setSelectedApplication] = useState<any | null>(null);
   const [showApplicationModal, setShowApplicationModal] = useState(false);
+  const [blogs, setBlogs] = useState<Blog[]>([]);
+  const [selectedBlog, setSelectedBlog] = useState<Blog | null>(null);
+  const [showBlogModal, setShowBlogModal] = useState(false);
+  const [blogFormData, setBlogFormData] = useState({
+    title: '',
+    slug: '',
+    content: '',
+    excerpt: '',
+    featuredImage: '',
+    category: '',
+    tags: [] as string[],
+    status: 'draft' as 'draft' | 'published'
+  });
+  const [blogTagInput, setBlogTagInput] = useState('');
+  const [showAIGenerateModal, setShowAIGenerateModal] = useState(false);
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [selectedAITopic, setSelectedAITopic] = useState<string>('funding');
+  const [customAITopic, setCustomAITopic] = useState('');
+  const [aiCategory, setAiCategory] = useState('Education');
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [applicationDocuments, setApplicationDocuments] = useState<any[]>([]);
   const [loadingApplication, setLoadingApplication] = useState(false);
   const [selectedEngagementForComment, setSelectedEngagementForComment] = useState<any | null>(null);
   const [showCommentModal, setShowCommentModal] = useState(false);
   const [engagementComment, setEngagementComment] = useState('');
+  const [documentSearch, setDocumentSearch] = useState('');
+  const [selectedDocumentUser, setSelectedDocumentUser] = useState<any | null>(null);
+  const [userDocumentList, setUserDocumentList] = useState<any[]>([]);
+  const [userDocumentCache, setUserDocumentCache] = useState<Record<string, any[]>>({});
+  const [loadingUserDocuments, setLoadingUserDocuments] = useState(false);
+  const [userDocumentError, setUserDocumentError] = useState<string | null>(null);
   const billingInfo = useMemo(() => {
     if (!selectedApplication) return null;
-    return selectedApplication.billingProfile || selectedApplication.profile?.billingProfile || null;
+
+    const candidateSources = [
+      selectedApplication.billingProfile,
+      selectedApplication.billingInfo,
+      (selectedApplication as any).banking,
+      selectedApplication.profile?.billingProfile,
+      selectedApplication.profile?.billingInfo,
+      selectedApplication.profile,
+      selectedApplication
+    ];
+
+    const pick = (...keys: string[]) => {
+      for (const source of candidateSources) {
+        if (!source) continue;
+        for (const key of keys) {
+          if (source[key] && typeof source[key] === 'string' && source[key].trim().length) {
+            return source[key];
+          }
+        }
+      }
+      return '';
+    };
+
+    const normalize = (value?: string | null) => (typeof value === 'string' ? value.trim() : value ?? '');
+
+    const normalized = {
+      companyName:
+        normalize(
+          pick(
+            'companyName',
+            'billingName',
+            'businessName',
+            'accountHolder',
+            'accountHolderName',
+            'name'
+          )
+        ) ||
+        normalize(selectedApplication.profile?.companyName) ||
+        normalize(selectedApplication.profile?.name) ||
+        normalize(selectedApplication.name),
+      contactEmail:
+        normalize(pick('contactEmail', 'billingEmail', 'email')) ||
+        normalize(selectedApplication.email) ||
+        normalize(selectedApplication.profile?.email),
+      phone:
+        normalize(pick('phone', 'contactPhone', 'billingPhone')) ||
+        normalize(selectedApplication.phone) ||
+        normalize(selectedApplication.profile?.phone),
+      vatNumber: normalize(pick('vatNumber', 'vat')),
+      billingReference:
+        normalize(pick('billingReference', 'reference', 'planReference')) ||
+        normalize(selectedApplication.planReference),
+      address: normalize(pick('address', 'billingAddress', 'physicalAddress')),
+      bankName: normalize(pick('bankName')),
+      accountHolder: normalize(pick('accountHolder', 'accountHolderName', 'accountName', 'companyName')),
+      accountNumber: normalize(pick('accountNumber', 'bankAccount')),
+      branchCode: normalize(pick('branchCode', 'branch', 'branchNumber')),
+      accountType: normalize(pick('accountType', 'accountCategory', 'accountKind'))
+    };
+
+    const hasValue = Object.values(normalized).some(
+      (value) => (typeof value === 'string' ? value.length > 0 : !!value)
+    );
+
+    return hasValue ? normalized : null;
   }, [selectedApplication]);
+
+  const documentUsers = useMemo(() => {
+    const combined = [...recentSMEs, ...recentSDPs];
+    return combined.sort((a: any, b: any) => {
+      const aName = (a.profile?.name || a.name || a.profile?.companyName || a.email || '').toLowerCase();
+      const bName = (b.profile?.name || b.name || b.profile?.companyName || b.email || '').toLowerCase();
+      return aName.localeCompare(bName);
+    });
+  }, [recentSMEs, recentSDPs]);
+
+  const filteredDocumentUsers = useMemo(() => {
+    const term = documentSearch.trim().toLowerCase();
+    if (!term) return documentUsers;
+    return documentUsers.filter((user: any) => {
+      const blob = [
+        user.profile?.name,
+        user.name,
+        user.email,
+        user.profile?.companyName,
+        user.role
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return blob.includes(term);
+    });
+  }, [documentUsers, documentSearch]);
+
+  const loadPendingDocumentsFromUsers = useCallback(async () => {
+    if (scanningUserDocs) return;
+    if (!isFirebaseConfigured()) return;
+
+    const combinedUsers = [...recentSMEs, ...recentSDPs];
+    if (!combinedUsers.length) {
+      return;
+    }
+
+    setScanningUserDocs(true);
+    setDocumentScanError(null);
+    setLoading(l => ({ ...l, documents: true }));
+
+    try {
+      const limit = Math.min(combinedUsers.length, MAX_USERS_FOR_PENDING_SCAN);
+      const pendingList: any[] = [];
+
+      for (let i = 0; i < limit; i++) {
+        const userRecord = combinedUsers[i];
+        if (!userRecord?.id) continue;
+        try {
+          const docsSnapshot = await getDocs(collection(db, 'users', userRecord.id, 'documents'));
+          docsSnapshot.forEach(docSnap => {
+            const data = docSnap.data();
+            if (isPendingReviewStatus(data.reviewStatus)) {
+              pendingList.push({
+                id: `${userRecord.id}-${docSnap.id}`,
+                documentId: docSnap.id,
+                userId: userRecord.id,
+                userName: userRecord.profile?.name ||
+                  userRecord.profile?.companyName ||
+                  userRecord.name ||
+                  userRecord.email ||
+                  'User',
+                userEmail: userRecord.email || userRecord.profile?.email || '',
+                userRole: userRecord.role || 'User',
+                isQueueDoc: false,
+                ...data
+              });
+            }
+          });
+        } catch (innerError) {
+          console.warn('Error loading documents for user:', userRecord.id, innerError);
+        }
+      }
+
+      pendingList.sort(
+        (a, b) => getTimestamp(b.uploadedAt || b.createdAt) - getTimestamp(a.uploadedAt || a.createdAt)
+      );
+
+      setPendingDocuments(pendingList);
+      setDocumentSource('fallback');
+      setDocumentQueueAvailable(false);
+    } catch (error: any) {
+      console.error('Error scanning user documents:', error);
+      setDocumentScanError(error.message || 'Unable to load pending documents from user profiles.');
+    } finally {
+      setScanningUserDocs(false);
+      setLoading(l => ({ ...l, documents: false }));
+    }
+  }, [recentSMEs, recentSDPs, scanningUserDocs]);
+
+  const filteredPendingDocuments = useMemo(() => {
+    const term = documentReviewSearch.trim().toLowerCase();
+    const roleFilter = documentReviewRole.toLowerCase();
+
+    return pendingDocuments.filter((doc: any) => {
+      if (documentReviewRole !== 'all') {
+        const docRole = (doc.userRole || '').toLowerCase();
+        if (docRole !== roleFilter) return false;
+      }
+
+      if (!term) return true;
+
+      const blob = [
+        doc.userName,
+        doc.userEmail,
+        doc.userRole,
+        doc.companyName,
+        doc.name,
+        doc.documentType
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+
+      return blob.includes(term);
+    });
+  }, [pendingDocuments, documentReviewSearch, documentReviewRole]);
+
+  const hasDocumentReviewFilters =
+    documentReviewRole !== 'all' || documentReviewSearch.trim().length > 0;
   const [loading, setLoading] = useState({
     smes: true, sdps: true, applications: true, engagements: true, escrow: true, documents: true
   });
@@ -615,12 +1003,20 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       }
     );
 
-    // Fetch pending documents for review
+    // Fetch documents for review queue
     const unsubDocs = onSnapshot(
-      query(collection(db, 'documentReviews'), where('reviewStatus', '==', 'pending')),
+      collection(db, 'documentReviews'),
       (snap) => {
         const items = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setPendingDocuments(items);
+        const pending = items.filter((item: any) => isPendingReviewStatus(item.reviewStatus));
+        if (pending.length > 0) {
+          setPendingDocuments(pending);
+          setDocumentSource('queue');
+          setDocumentQueueAvailable(true);
+        } else {
+          setDocumentQueueAvailable(false);
+          setDocumentSource(prev => (prev === 'queue' ? null : prev));
+        }
         setLoading(l => ({ ...l, documents: false }));
       },
       (error: any) => {
@@ -628,7 +1024,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         if (error.code === 'permission-denied' || error.message?.includes('permission')) {
           console.warn('Permission denied for documents. Admin may need to refresh token.');
         }
-        setPendingDocuments([]);
+        setDocumentQueueAvailable(false);
+        setDocumentSource(prev => (prev === 'queue' ? null : prev));
         setLoading(l => ({ ...l, documents: false }));
       }
     );
@@ -684,6 +1081,23 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       monthlyRevenue: `R${monthlyRevenue.toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
     }));
   }, [recentEngagements]);
+
+  // Hydrate pending documents from user uploads when queue is empty
+  useEffect(() => {
+    if (documentQueueAvailable) return;
+    if (scanningUserDocs) return;
+    if (documentSource === 'fallback' && pendingDocuments.length > 0) return;
+    if (!recentSMEs.length && !recentSDPs.length) return;
+    loadPendingDocumentsFromUsers();
+  }, [
+    documentQueueAvailable,
+    scanningUserDocs,
+    documentSource,
+    pendingDocuments.length,
+    recentSMEs,
+    recentSDPs,
+    loadPendingDocumentsFromUsers
+  ]);
 
   // Load Recent Activities for Admin
   useEffect(() => {
@@ -803,6 +1217,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     { id: 'documents' as ViewType, label: 'Documents', icon: FolderOpen, badge: pendingDocuments.length },
     { id: 'disputes' as ViewType, label: 'Disputes', icon: AlertTriangle, badge: disputedEngagements.length },
     { id: 'payments' as ViewType, label: 'Payments', icon: DollarSign, badge: pendingPayments.length },
+    { id: 'blogs' as ViewType, label: 'Blogs', icon: BookOpen },
     { id: 'smes' as ViewType, label: 'SMEs', icon: Users },
     { id: 'sdps' as ViewType, label: 'SDPs', icon: Briefcase },
     { id: 'engagements' as ViewType, label: 'Engagements', icon: Activity },
@@ -1641,6 +2056,44 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </div>
             )}
           </div>
+                    {billingInfo && (
+                      <div className="mt-6 border-t border-gray-200 pt-4">
+                        <h4 className="text-base font-semibold text-gray-900 mb-3 flex items-center">
+                          <CreditCard className="w-4 h-4 mr-2 text-blue-600" />
+                          Billing & Banking Snapshot
+                        </h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                          <div>
+                            <p className="text-gray-500">Billing Contact</p>
+                            <p className="font-semibold text-gray-900">{billingInfo.contactEmail || 'Not provided'}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">Phone</p>
+                            <p className="font-semibold text-gray-900">{billingInfo.phone || 'Not provided'}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">Bank Name</p>
+                            <p className="font-semibold text-gray-900">{billingInfo.bankName || 'Not provided'}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">Account Holder</p>
+                            <p className="font-semibold text-gray-900">{billingInfo.accountHolder || 'Not provided'}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">Account Number</p>
+                            <p className="font-semibold text-gray-900">{maskAccountNumber(billingInfo.accountNumber)}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">Branch / Code</p>
+                            <p className="font-semibold text-gray-900">{billingInfo.branchCode || 'Not provided'}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">Account Type</p>
+                            <p className="font-semibold text-gray-900">{billingInfo.accountType || 'Not provided'}</p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
         </div>
       </div>
     );
@@ -2418,6 +2871,931 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       </div>
     );
   };
+
+  // Load blogs
+  useEffect(() => {
+    if (activeView === 'blogs' && isFirebaseConfigured()) {
+      const blogsRef = collection(db, 'blogs');
+      const q = query(blogsRef, orderBy('createdAt', 'desc'));
+      
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const blogsData: Blog[] = [];
+        snapshot.forEach((doc) => {
+          const data = doc.data();
+          blogsData.push({
+            id: doc.id,
+            ...data,
+            publishedAt: data.publishedAt,
+            createdAt: data.createdAt,
+            updatedAt: data.updatedAt,
+          } as Blog);
+        });
+        setBlogs(blogsData);
+      });
+
+      return () => unsubscribe();
+    }
+  }, [activeView]);
+
+  const generateSlug = (title: string) => {
+    return title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '');
+  };
+
+  const handleCreateBlog = () => {
+    setBlogFormData({
+      title: '',
+      slug: '',
+      content: '',
+      excerpt: '',
+      featuredImage: '',
+      category: '',
+      tags: [],
+      status: 'draft'
+    });
+    setSelectedBlog(null);
+    setShowBlogModal(true);
+  };
+
+  const handleEditBlog = (blog: Blog) => {
+    setBlogFormData({
+      title: blog.title,
+      slug: blog.slug,
+      content: blog.content,
+      excerpt: blog.excerpt || '',
+      featuredImage: blog.featuredImage || '',
+      category: blog.category || '',
+      tags: blog.tags || [],
+      status: blog.status
+    });
+    setSelectedBlog(blog);
+    setImagePreview(blog.featuredImage || null);
+    setShowBlogModal(true);
+  };
+
+  const handleSaveBlog = async () => {
+    if (!blogFormData.title.trim()) {
+      alert('Please enter a title');
+      return;
+    }
+    if (!blogFormData.content.trim()) {
+      alert('Please enter content');
+      return;
+    }
+
+    try {
+      const slug = blogFormData.slug || generateSlug(blogFormData.title);
+      const now = Timestamp.now();
+      const blogData = {
+        ...blogFormData,
+        slug,
+        authorId: user.id,
+        authorName: user.profile?.name || user.email,
+        authorEmail: user.email,
+        updatedAt: now,
+        ...(selectedBlog ? {} : { createdAt: now }),
+        ...(blogFormData.status === 'published' && !selectedBlog?.publishedAt 
+          ? { publishedAt: now } 
+          : blogFormData.status === 'published' && selectedBlog?.publishedAt
+          ? { publishedAt: selectedBlog.publishedAt }
+          : {})
+      };
+
+      if (selectedBlog) {
+        await updateDoc(doc(db, 'blogs', selectedBlog.id), blogData);
+      } else {
+        await addDoc(collection(db, 'blogs'), blogData);
+      }
+
+      setShowBlogModal(false);
+      setSelectedBlog(null);
+      setImagePreview(null);
+      alert(selectedBlog ? 'Blog updated successfully!' : 'Blog created successfully!');
+    } catch (error: any) {
+      console.error('Error saving blog:', error);
+      alert('Failed to save blog: ' + error.message);
+    }
+  };
+
+  const handleDeleteBlog = async (blogId: string) => {
+    if (!confirm('Are you sure you want to delete this blog? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      await deleteDoc(doc(db, 'blogs', blogId));
+      alert('Blog deleted successfully!');
+    } catch (error: any) {
+      console.error('Error deleting blog:', error);
+      alert('Failed to delete blog: ' + error.message);
+    }
+  };
+
+  const handleToggleBlogStatus = async (blog: Blog) => {
+    try {
+      const newStatus = blog.status === 'published' ? 'draft' : 'published';
+      const updateData: any = {
+        status: newStatus,
+        updatedAt: Timestamp.now()
+      };
+
+      if (newStatus === 'published' && !blog.publishedAt) {
+        updateData.publishedAt = Timestamp.now();
+      }
+
+      await updateDoc(doc(db, 'blogs', blog.id), updateData);
+      alert(`Blog ${newStatus === 'published' ? 'published' : 'unpublished'} successfully!`);
+    } catch (error: any) {
+      console.error('Error updating blog status:', error);
+      alert('Failed to update blog status: ' + error.message);
+    }
+  };
+
+  const addTag = () => {
+    if (blogTagInput.trim() && !blogFormData.tags.includes(blogTagInput.trim())) {
+      setBlogFormData({
+        ...blogFormData,
+        tags: [...blogFormData.tags, blogTagInput.trim()]
+      });
+      setBlogTagInput('');
+    }
+  };
+
+  const removeTag = (tag: string) => {
+    setBlogFormData({
+      ...blogFormData,
+      tags: blogFormData.tags.filter(t => t !== tag)
+    });
+  };
+
+  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      alert('Please select an image file');
+      return;
+    }
+
+    // Validate file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Image size must be less than 5MB');
+      return;
+    }
+
+    if (!isStorageConfigured()) {
+      alert('Storage is not configured. Please use an image URL instead.');
+      return;
+    }
+
+    try {
+      setUploadingImage(true);
+      
+      // Create a preview
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImagePreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+
+      // Upload to Firebase Storage
+      const timestamp = Date.now();
+      const fileName = `blog-images/${user.id}/${timestamp}-${file.name}`;
+      const storageRef = ref(storage, fileName);
+      
+      await uploadBytes(storageRef, file);
+      const downloadURL = await getDownloadURL(storageRef);
+      
+      setBlogFormData({
+        ...blogFormData,
+        featuredImage: downloadURL
+      });
+      
+      alert('Image uploaded successfully!');
+    } catch (error: any) {
+      console.error('Error uploading image:', error);
+      alert('Failed to upload image: ' + error.message);
+      setImagePreview(null);
+    } finally {
+      setUploadingImage(false);
+      // Reset file input
+      event.target.value = '';
+    }
+  };
+
+  const handleRemoveImage = () => {
+    setBlogFormData({
+      ...blogFormData,
+      featuredImage: ''
+    });
+    setImagePreview(null);
+  };
+
+  const handleGenerateAIBlog = async () => {
+    if (!isFirebaseConfigured()) {
+      alert('Firebase is not configured');
+      return;
+    }
+
+    try {
+      setAiGenerating(true);
+      const generateBlog = httpsCallable(functions, 'generateBlogWithAI');
+      
+      const result = await generateBlog({
+        topic: selectedAITopic,
+        category: aiCategory,
+        customTopic: customAITopic.trim() || undefined
+      });
+
+      const data = result.data as any;
+      if (data.success && data.blog) {
+        // Populate form with generated blog
+        setBlogFormData({
+          title: data.blog.title,
+          slug: data.blog.slug || generateSlug(data.blog.title),
+          content: data.blog.content,
+          excerpt: data.blog.excerpt || '',
+          featuredImage: '',
+          category: data.blog.category || aiCategory,
+          tags: data.blog.tags || [],
+          status: 'draft'
+        });
+        setShowAIGenerateModal(false);
+        setShowBlogModal(true);
+        setSelectedBlog(null);
+        setSelectedAITopic('funding');
+        setCustomAITopic('');
+        setAiCategory('Education');
+        alert('Blog generated successfully! Review and edit before publishing.');
+      } else {
+        alert('Failed to generate blog. Please try again.');
+      }
+    } catch (error: any) {
+      console.error('Error generating blog:', error);
+      alert('Error generating blog: ' + (error.message || 'Unknown error'));
+    } finally {
+      setAiGenerating(false);
+    }
+  };
+
+  const renderBlogs = () => (
+    <div className="space-y-6">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-xl font-bold text-gray-900">Manage Blogs</h2>
+          <div className="flex items-center space-x-3">
+            <Button
+              onClick={() => setShowAIGenerateModal(true)}
+              className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white"
+            >
+              <Sparkles className="w-4 h-4 mr-2" />
+              Generate with AI
+            </Button>
+            <Button
+              onClick={handleCreateBlog}
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              Create Blog
+            </Button>
+          </div>
+        </div>
+
+        {blogs.length === 0 ? (
+          <div className="text-center py-12">
+            <BookOpen className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+            <p className="text-gray-500 text-lg mb-4">No blogs yet</p>
+            <Button
+              onClick={handleCreateBlog}
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              Create Your First Blog
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {blogs.map((blog) => (
+              <div
+                key={blog.id}
+                className="border border-gray-200 rounded-xl overflow-hidden hover:shadow-lg transition-all bg-white"
+              >
+                <div className="flex flex-col md:flex-row">
+                  {/* Featured Image */}
+                  {blog.featuredImage && (
+                    <div className="md:w-64 w-full h-48 md:h-auto bg-gray-100 flex-shrink-0">
+                      <img
+                        src={blog.featuredImage}
+                        alt={blog.title}
+                        className="w-full h-full object-cover"
+                      />
+                    </div>
+                  )}
+                  
+                  {/* Content */}
+                  <div className="flex-1 p-5 flex flex-col">
+                    <div className="flex-1">
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex-1">
+                          <div className="flex items-center flex-wrap gap-2 mb-2">
+                            <h3 className="text-xl font-bold text-gray-900">{blog.title}</h3>
+                            <Badge
+                              variant={blog.status === 'published' ? 'default' : 'warning'}
+                              size="sm"
+                              className="font-semibold"
+                            >
+                              {blog.status === 'published' ? '✓ Published' : 'Draft'}
+                            </Badge>
+                            {blog.category && (
+                              <Badge variant="outline" size="sm" className="border-blue-300 text-blue-700">
+                                {blog.category}
+                              </Badge>
+                            )}
+                          </div>
+                          <p className="text-gray-600 text-sm mb-3 line-clamp-2">
+                            {blog.excerpt || blog.content.replace(/<[^>]*>/g, '').substring(0, 150) + '...'}
+                          </p>
+                        </div>
+                      </div>
+                      
+                      {/* Tags */}
+                      {blog.tags && blog.tags.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mb-3">
+                          {blog.tags.slice(0, 3).map((tag, idx) => (
+                            <span key={idx} className="px-2 py-0.5 text-xs bg-gray-100 text-gray-600 rounded-full">
+                              #{tag}
+                            </span>
+                          ))}
+                          {blog.tags.length > 3 && (
+                            <span className="px-2 py-0.5 text-xs text-gray-400">+{blog.tags.length - 3} more</span>
+                          )}
+                        </div>
+                      )}
+                      
+                      <div className="flex items-center space-x-4 text-xs text-gray-500">
+                        <span className="flex items-center">
+                          <User className="w-3 h-3 mr-1" />
+                          {blog.authorName}
+                        </span>
+                        <span className="flex items-center">
+                          <Clock className="w-3 h-3 mr-1" />
+                          {formatDateTime(blog.createdAt, 'N/A')}
+                        </span>
+                        {blog.views !== undefined && (
+                          <span className="flex items-center">
+                            <Eye className="w-3 h-3 mr-1" />
+                            {blog.views} views
+                          </span>
+                        )}
+                      </div>
+                      </div>
+                    
+                    {/* Action Buttons */}
+                    <div className="flex items-center space-x-2 mt-4 pt-4 border-t border-gray-200">
+                      <Button
+                        onClick={() => handleToggleBlogStatus(blog)}
+                        size="sm"
+                        className={blog.status === 'published' 
+                          ? 'bg-yellow-600 hover:bg-yellow-700 text-white'
+                          : 'bg-green-600 hover:bg-green-700 text-white'
+                        }
+                      >
+                        {blog.status === 'published' ? (
+                          <>
+                            <EyeOff className="w-4 h-4 mr-1" />
+                            Unpublish
+                          </>
+                        ) : (
+                          <>
+                            <Eye className="w-4 h-4 mr-1" />
+                            Publish
+                          </>
+                        )}
+                      </Button>
+                      <Button
+                        onClick={() => handleEditBlog(blog)}
+                        size="sm"
+                        className="bg-blue-600 hover:bg-blue-700 text-white"
+                      >
+                        <Edit className="w-4 h-4 mr-1" />
+                        Edit
+                      </Button>
+                      <Button
+                        onClick={() => {
+                          if (blog.slug) {
+                            window.open(`/blogs/${blog.slug}`, '_blank');
+                          } else {
+                            alert('Blog slug is missing. Please edit the blog and add a slug.');
+                          }
+                        }}
+                        size="sm"
+                        className="bg-green-600 hover:bg-green-700 text-white"
+                        disabled={!blog.slug}
+                      >
+                        <ExternalLink className="w-4 h-4 mr-1" />
+                        View
+                      </Button>
+                      <Button
+                        onClick={() => handleDeleteBlog(blog.id)}
+                        size="sm"
+                        variant="outline"
+                        className="border-red-300 text-red-700 hover:bg-red-50"
+                      >
+                        <Trash2 className="w-4 h-4 mr-1" />
+                        Delete
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Blog Modal */}
+      {showBlogModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[95vh] overflow-hidden flex flex-col">
+            {/* Stunning Header */}
+            <div className="bg-gradient-to-r from-blue-600 via-purple-600 to-pink-600 text-white p-6">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <div className="p-2 bg-white/20 rounded-lg backdrop-blur-sm">
+                    <BookOpen className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold">
+                      {selectedBlog ? 'Edit Blog Post' : 'Create Stunning Blog'}
+                    </h2>
+                    <p className="text-blue-100 text-sm mt-1">
+                      {selectedBlog ? 'Update your blog content' : 'Share your knowledge with the world'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowBlogModal(false);
+                    setSelectedBlog(null);
+                    setImagePreview(null);
+                  }}
+                  className="p-2 hover:bg-white/20 rounded-lg transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Scrollable Content */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-gray-50">
+              {/* Title */}
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200">
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  <span className="text-red-500">*</span> Blog Title
+                </label>
+                <input
+                  type="text"
+                  value={blogFormData.title}
+                  onChange={(e) => {
+                    setBlogFormData({
+                      ...blogFormData,
+                      title: e.target.value,
+                      slug: blogFormData.slug || generateSlug(e.target.value)
+                    });
+                  }}
+                  className="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+                  placeholder="Enter a captivating blog title..."
+                />
+              </div>
+
+              {/* Slug and Excerpt Row */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200">
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    URL Slug
+                  </label>
+                  <input
+                    type="text"
+                    value={blogFormData.slug}
+                    onChange={(e) => setBlogFormData({ ...blogFormData, slug: e.target.value })}
+                    className="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+                    placeholder="blog-url-slug"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Auto-generated from title</p>
+                </div>
+
+                <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200">
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Category
+                  </label>
+                  <input
+                    type="text"
+                    value={blogFormData.category}
+                    onChange={(e) => setBlogFormData({ ...blogFormData, category: e.target.value })}
+                    className="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+                    placeholder="e.g., Education, News"
+                  />
+                </div>
+              </div>
+
+              {/* Excerpt */}
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200">
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Excerpt / Summary
+                </label>
+                <textarea
+                  value={blogFormData.excerpt}
+                  onChange={(e) => setBlogFormData({ ...blogFormData, excerpt: e.target.value })}
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all resize-none"
+                  rows={3}
+                  placeholder="Write a compelling summary that will appear in blog listings..."
+                />
+                <p className="text-xs text-gray-500 mt-2">
+                  This will be shown in blog previews and search results
+                </p>
+              </div>
+
+              {/* Content Editor */}
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200">
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  <span className="text-red-500">*</span> Blog Content
+                </label>
+                <textarea
+                  value={blogFormData.content}
+                  onChange={(e) => setBlogFormData({ ...blogFormData, content: e.target.value })}
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all font-mono text-sm"
+                  rows={16}
+                  placeholder="Write your blog content here... You can use HTML tags for formatting:
+
+<h2>Heading</h2>
+<p>Paragraph text</p>
+<ul><li>List items</li></ul>
+<strong>Bold</strong> and <em>italic</em> text"
+                />
+                <div className="mt-3 flex items-center justify-between">
+                  <p className="text-xs text-gray-500">
+                    HTML formatting supported • Use &lt;h2&gt;, &lt;p&gt;, &lt;ul&gt;, &lt;li&gt;, &lt;strong&gt;, &lt;em&gt; tags
+                  </p>
+                  <span className="text-xs text-gray-400">
+                    {blogFormData.content.length} characters
+                  </span>
+                </div>
+              </div>
+
+              {/* Featured Image Section */}
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200">
+                <label className="block text-sm font-semibold text-gray-700 mb-3">
+                  <ImageIcon className="w-4 h-4 inline mr-2" />
+                  Featured Image
+                </label>
+                
+                {/* Image Preview */}
+                {(imagePreview || blogFormData.featuredImage) && (
+                  <div className="mb-4 relative group">
+                    <div className="relative rounded-xl overflow-hidden border-2 border-gray-200 bg-gradient-to-br from-gray-50 to-gray-100 shadow-inner">
+                      <img
+                        src={imagePreview || blogFormData.featuredImage}
+                        alt="Featured"
+                        className="w-full h-72 object-cover"
+                        onError={() => {
+                          setImagePreview(null);
+                          setBlogFormData({ ...blogFormData, featuredImage: '' });
+                        }}
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                      <button
+                        onClick={handleRemoveImage}
+                        className="absolute top-3 right-3 p-2 bg-red-600 text-white rounded-full hover:bg-red-700 transition-all shadow-lg opacity-0 group-hover:opacity-100"
+                        type="button"
+                      >
+                        <XCircle className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Upload Section */}
+                <div className="space-y-4">
+                  <label
+                    htmlFor="image-upload"
+                    className={`flex items-center justify-center px-6 py-8 border-2 border-dashed rounded-xl cursor-pointer transition-all bg-gradient-to-br ${
+                      uploadingImage
+                        ? 'border-blue-400 bg-blue-50 from-blue-50 to-blue-100'
+                        : 'border-gray-300 hover:border-blue-500 hover:bg-blue-50 from-white to-gray-50'
+                    }`}
+                  >
+                    {uploadingImage ? (
+                      <div className="flex flex-col items-center space-y-3 text-blue-600">
+                        <Loader2 className="w-8 h-8 animate-spin" />
+                        <span className="font-semibold">Uploading image...</span>
+                        <span className="text-sm text-blue-500">Please wait</span>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center space-y-3 text-gray-600">
+                        <div className="p-4 bg-gradient-to-br from-blue-100 to-purple-100 rounded-full shadow-lg">
+                          <Upload className="w-8 h-8 text-blue-600" />
+                        </div>
+                        <div className="text-center">
+                          <span className="font-semibold text-gray-900 block">Click to upload image</span>
+                          <span className="text-sm text-gray-500 block mt-1">or drag and drop</span>
+                          <span className="text-xs text-gray-400 block mt-2">PNG, JPG, GIF up to 5MB</span>
+                        </div>
+                      </div>
+                    )}
+                    <input
+                      id="image-upload"
+                      type="file"
+                      accept="image/*"
+                      onChange={handleImageUpload}
+                      disabled={uploadingImage}
+                      className="hidden"
+                    />
+                  </label>
+
+                  {/* Or use URL */}
+                  <div className="relative">
+                    <div className="absolute inset-0 flex items-center">
+                      <div className="w-full border-t border-gray-300"></div>
+                    </div>
+                    <div className="relative flex justify-center text-sm">
+                      <span className="px-3 bg-white text-gray-500 font-medium">OR</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <input
+                      type="url"
+                      value={blogFormData.featuredImage}
+                      onChange={(e) => {
+                        setBlogFormData({ ...blogFormData, featuredImage: e.target.value });
+                        if (e.target.value) {
+                          setImagePreview(e.target.value);
+                        }
+                      }}
+                      className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+                      placeholder="Paste image URL here (e.g., https://example.com/image.jpg)"
+                    />
+                    <p className="text-xs text-gray-500 mt-2 flex items-center">
+                      <ImageIcon className="w-3 h-3 mr-1" />
+                      Use an external image URL if you prefer not to upload
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Tags and Status */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Tags */}
+                <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200">
+                  <label className="block text-sm font-semibold text-gray-700 mb-3">
+                    Tags
+                  </label>
+                  <div className="flex flex-wrap gap-2 mb-3 min-h-[40px]">
+                    {blogFormData.tags.length > 0 ? (
+                      blogFormData.tags.map((tag, index) => (
+                        <Badge key={index} variant="default" size="sm" className="flex items-center px-3 py-1 bg-blue-100 text-blue-800 border border-blue-300">
+                          {tag}
+                          <button
+                            onClick={() => removeTag(tag)}
+                            className="ml-2 hover:text-red-600 transition-colors"
+                            type="button"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </Badge>
+                      ))
+                    ) : (
+                      <span className="text-sm text-gray-400 italic">No tags added yet</span>
+                    )}
+                  </div>
+                  <div className="flex space-x-2">
+                    <input
+                      type="text"
+                      value={blogTagInput}
+                      onChange={(e) => setBlogTagInput(e.target.value)}
+                      onKeyPress={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          addTag();
+                        }
+                      }}
+                      className="flex-1 px-4 py-2 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+                      placeholder="Type tag and press Enter"
+                    />
+                    <Button 
+                      onClick={addTag} 
+                      className="bg-blue-600 hover:bg-blue-700 text-white px-4"
+                      disabled={!blogTagInput.trim()}
+                    >
+                      Add
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Status */}
+                <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200">
+                  <label className="block text-sm font-semibold text-gray-700 mb-3">
+                    Publication Status
+                  </label>
+                  <select
+                    value={blogFormData.status}
+                    onChange={(e) => setBlogFormData({ ...blogFormData, status: e.target.value as 'draft' | 'published' })}
+                    className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all font-medium"
+                  >
+                    <option value="draft">📝 Draft (Save for later)</option>
+                    <option value="published">🚀 Published (Make live)</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-2">
+                    {blogFormData.status === 'draft' 
+                      ? 'Blog will be saved but not visible to public'
+                      : 'Blog will be immediately visible to all visitors'}
+                  </p>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Footer with Action Buttons */}
+            <div className="bg-white border-t border-gray-200 p-6 rounded-b-2xl">
+              <div className="flex items-center justify-between">
+                <div className="text-sm text-gray-500">
+                  {blogFormData.title && (
+                    <span className="flex items-center">
+                      <CheckCircle className="w-4 h-4 mr-1 text-green-500" />
+                      Ready to {selectedBlog ? 'update' : 'publish'}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center space-x-3">
+                  <Button
+                    onClick={() => {
+                      setShowBlogModal(false);
+                      setSelectedBlog(null);
+                      setImagePreview(null);
+                    }}
+                    variant="outline"
+                    className="border-gray-300 text-gray-700 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleSaveBlog}
+                    className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-lg hover:shadow-xl transition-all px-6"
+                  >
+                    {selectedBlog ? (
+                      <>
+                        <Edit className="w-4 h-4 mr-2" />
+                        Update Blog
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="w-4 h-4 mr-2" />
+                        Create Blog
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AI Generate Blog Modal */}
+      {showAIGenerateModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl">
+            <div className="bg-gradient-to-r from-purple-600 to-pink-600 text-white p-6 rounded-t-2xl">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <Sparkles className="w-6 h-6" />
+                  <h2 className="text-2xl font-bold">Generate Blog with AI</h2>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowAIGenerateModal(false);
+                    setSelectedAITopic('funding');
+                    setCustomAITopic('');
+                    setAiCategory('Education');
+                  }}
+                  className="p-2 hover:bg-white/20 rounded-lg transition-colors"
+                  disabled={aiGenerating}
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-6">
+              {/* Custom Topic Input - Above Select Topic */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  <span className="flex items-center">
+                    Custom Topic (Optional)
+                    <span className="ml-2 text-xs text-gray-500 font-normal">- Be specific about what you want the AI to focus on</span>
+                  </span>
+                </label>
+                <input
+                  type="text"
+                  value={customAITopic}
+                  onChange={(e) => setCustomAITopic(e.target.value)}
+                  placeholder="e.g., 'How to become a QCTO accredited assessor in Gauteng' or 'SETA funding for small businesses in 2025'"
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-all"
+                  disabled={aiGenerating}
+                />
+                <p className="text-xs text-gray-500 mt-2">
+                  Enter a specific topic to guide the AI. If left empty, the selected topic below will be used.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Select Topic Category
+                </label>
+                <select
+                  value={selectedAITopic}
+                  onChange={(e) => setSelectedAITopic(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  disabled={aiGenerating}
+                >
+                  <option value="funding">Funding Opportunities</option>
+                  <option value="facilitation">Facilitation Services</option>
+                  <option value="assessors">Becoming an Assessor</option>
+                  <option value="qcto">QCTO Qualifications</option>
+                  <option value="setas">SETAs Overview</option>
+                  <option value="government">Government Programs</option>
+                  <option value="bursaries">Bursaries & Scholarships</option>
+                  <option value="accreditations">Accreditations</option>
+                  <option value="sme_income">Making Money as an SME</option>
+                </select>
+                <p className="text-xs text-gray-500 mt-2">
+                  Select a general topic category. The custom topic above will take priority if provided.
+                </p>
+              </div>
+
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Category
+                </label>
+                <input
+                  type="text"
+                  value={aiCategory}
+                  onChange={(e) => setAiCategory(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  placeholder="e.g., Education, News"
+                  disabled={aiGenerating}
+                />
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <p className="text-sm text-blue-800">
+                  <strong>AI Blog Generation:</strong> The AI will research and write a comprehensive blog post about your selected topic, 
+                  focusing on the South African education context. The generated content will include natural links back to the Scholarz platform 
+                  and will be ready for review and editing before publishing.
+                </p>
+              </div>
+
+              <div className="flex justify-end space-x-3 pt-4 border-t">
+                <Button
+                  onClick={() => {
+                    setShowAIGenerateModal(false);
+                    setSelectedAITopic('funding');
+                    setCustomAITopic('');
+                    setAiCategory('Education');
+                  }}
+                  className="bg-gray-600 hover:bg-gray-700 text-white"
+                  disabled={aiGenerating}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleGenerateAIBlog}
+                  className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white"
+                  disabled={aiGenerating || (selectedAITopic === 'custom' && !customAITopic.trim())}
+                >
+                  {aiGenerating ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4 mr-2" />
+                      Generate Blog
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 
   const renderSMEs = () => (
     <div className="space-y-6">
@@ -3600,36 +4978,45 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                             )}
                     </div>
                         )}
-                        <div className="space-y-1.5 text-sm text-gray-600 mb-3">
-                          <p className="flex items-center">
-                            <span className="font-medium w-20">Email:</span>
-                            <span>{application.applicantEmail || application.email || 'N/A'}</span>
-                          </p>
-                          {application.location && application.location !== 'N/A' && (
-                            <p className="flex items-center">
-                              <span className="font-medium w-20">Location:</span>
-                              <span>{application.location}</span>
-                            </p>
+                        <div className="bg-gray-50 rounded-lg p-4 mb-3">
+                          <div className="grid grid-cols-2 gap-4 text-sm">
+                            <div className="flex flex-col">
+                              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Email</span>
+                              <span className="text-gray-900 font-medium break-words">{application.applicantEmail || application.email || 'N/A'}</span>
+                            </div>
+                            {application.location && application.location !== 'N/A' ? (
+                              <div className="flex flex-col">
+                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Location</span>
+                                <span className="text-gray-900 font-medium">{application.location}</span>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col">
+                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Submitted</span>
+                                <span className="text-gray-900 font-medium">{formatDate(application.createdAt || application.submitted)}</span>
+                              </div>
                           )}
                           {application.specializations && application.specializations.length > 0 && (
-                            <p className="flex items-center">
-                              <span className="font-medium w-20">Specializations:</span>
-                              <span className="flex flex-wrap gap-1">
+                              <div className="flex flex-col col-span-2">
+                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Specializations</span>
+                                <div className="flex flex-wrap gap-1.5">
                                 {application.specializations.slice(0, 3).map((spec: string, idx: number) => (
-                                  <Badge key={idx} variant="outline" size="sm" className="text-xs">
+                                    <Badge key={idx} variant="outline" size="sm" className="text-xs bg-white border-gray-300">
                                     {spec}
                                   </Badge>
                                 ))}
                                 {application.specializations.length > 3 && (
-                                  <span className="text-gray-500">+{application.specializations.length - 3} more</span>
+                                    <span className="text-gray-500 text-xs self-center">+{application.specializations.length - 3} more</span>
                                 )}
-                              </span>
-                            </p>
+                                </div>
+                              </div>
                           )}
-                          <p className="flex items-center text-xs text-gray-500">
-                            <span className="font-medium w-20">Submitted:</span>
-                            <span>{formatDate(application.createdAt || application.submitted)}</span>
-                          </p>
+                            {application.location && application.location !== 'N/A' && (
+                              <div className="flex flex-col">
+                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Submitted</span>
+                                <span className="text-gray-900 font-medium">{formatDate(application.createdAt || application.submitted)}</span>
+                              </div>
+                            )}
+                          </div>
                   </div>
                 </div>
                   </div>
@@ -4119,21 +5506,294 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     <div className="space-y-6">
       <div className="bg-white rounded-xl shadow-sm border border-gray-200">
         <div className="p-6 border-b border-gray-200">
-          <h2 className="text-xl font-bold text-gray-900">Document Reviews</h2>
-          <p className="text-sm text-gray-600 mt-1">Review and approve or reject uploaded documents</p>
+          <h2 className="text-xl font-bold text-gray-900">Registration Uploads</h2>
+          <p className="text-sm text-gray-600 mt-1">
+            Browse every SME/SDP and inspect the documents they provided during onboarding.
+          </p>
+        </div>
+        <div className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="space-y-4">
+            <div className="relative">
+              <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={documentSearch}
+                onChange={(e) => setDocumentSearch(e.target.value)}
+                placeholder="Search by name, email, or company..."
+                className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+            <div className="border border-gray-100 rounded-2xl bg-gray-50 max-h-[520px] overflow-y-auto divide-y divide-gray-100">
+              {filteredDocumentUsers.length === 0 ? (
+                <div className="p-6 text-center text-sm text-gray-500">
+                  No users match "{documentSearch}".
+                </div>
+              ) : (
+                filteredDocumentUsers.map((user: any) => {
+                  const isActive = selectedDocumentUser?.id === user.id;
+                  return (
+                    <button
+                      key={user.id}
+                      onClick={() => handleSelectDocumentUser(user)}
+                      className={`w-full text-left p-4 transition-all ${
+                        isActive
+                          ? 'bg-white border-l-4 border-blue-500 shadow-sm'
+                          : 'hover:bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="font-semibold text-gray-900">
+                            {user.profile?.name || user.profile?.companyName || user.name || user.email}
+                          </p>
+                          <p className="text-xs text-gray-500">{user.email || 'No email on record'}</p>
+                        </div>
+                        <Badge
+                          variant={user.role === 'SME' ? 'info' : 'success'}
+                          size="sm"
+                        >
+                          {user.role || 'User'}
+                        </Badge>
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-gray-500 mt-2">
+                        <span>Status: {user.rejected ? 'Rejected' : user.verified ? 'Verified' : 'Pending'}</span>
+                        {user.profile?.sectors?.length > 0 && (
+                          <span>{user.profile.sectors.length} sectors</span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+          <div className="lg:col-span-2 border border-gray-100 rounded-2xl p-6 bg-gray-50">
+            {!selectedDocumentUser ? (
+              <div className="h-full flex flex-col items-center justify-center text-center text-gray-500 py-16">
+                <FolderOpen className="w-16 h-16 text-gray-400 mb-4" />
+                <p className="text-lg font-semibold text-gray-700">Select a user to view their documents</p>
+                <p className="text-sm text-gray-500 mt-2">
+                  Click on any SME or SDP on the left to load all documents they uploaded during registration.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                  <div>
+                    <h3 className="text-xl font-semibold text-gray-900">
+                      {selectedDocumentUser.profile?.name ||
+                        selectedDocumentUser.profile?.companyName ||
+                        selectedDocumentUser.name ||
+                        'User'}
+                    </h3>
+                    <p className="text-sm text-gray-600">{selectedDocumentUser.email}</p>
+                    {selectedDocumentUser.profile?.companyName && (
+                      <p className="text-xs text-gray-500 mt-1">
+                        {selectedDocumentUser.profile.companyName}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Badge variant={selectedDocumentUser.role === 'SME' ? 'info' : 'success'} size="sm">
+                      {selectedDocumentUser.role}
+                    </Badge>
+                    <Badge
+                      variant={
+                        selectedDocumentUser.rejected
+                          ? 'danger'
+                          : selectedDocumentUser.verified
+                            ? 'success'
+                            : 'warning'
+                      }
+                      size="sm"
+                    >
+                      {selectedDocumentUser.rejected
+                        ? 'Rejected'
+                        : selectedDocumentUser.verified
+                          ? 'Verified'
+                          : 'Pending'}
+                    </Badge>
+                  </div>
+                </div>
+
+                {userDocumentError && (
+                  <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg p-3">
+                    {userDocumentError}
+                  </div>
+                )}
+
+                {loadingUserDocuments ? (
+                  <div className="py-16 flex flex-col items-center justify-center text-gray-500">
+                    <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-3"></div>
+                    Loading documents...
+                  </div>
+                ) : userDocumentList.length === 0 ? (
+                  <div className="py-12 text-center text-gray-500">
+                    <FolderOpen className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+                    No documents uploaded yet.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {userDocumentList.map((doc: any) => (
+                      <div
+                        key={doc.id}
+                        className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm"
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                          <div>
+                            <p className="font-semibold text-gray-900">
+                              {doc.name || doc.fileName || doc.type || 'Document'}
+                            </p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              {doc.type || doc.category || doc.documentType || 'Unspecified'} •{' '}
+                              {doc.size || 'Size unknown'}
+                            </p>
+                          </div>
+                          {doc.reviewStatus && (
+                            <Badge
+                              variant={
+                                doc.reviewStatus === 'approved'
+                                  ? 'success'
+                                  : doc.reviewStatus === 'rejected'
+                                    ? 'danger'
+                                    : 'warning'
+                              }
+                              size="sm"
+                            >
+                              {doc.reviewStatus.charAt(0).toUpperCase() + doc.reviewStatus.slice(1)}
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-500 flex flex-wrap gap-4 mt-3">
+                          <span>Uploaded: {formatDateTime(doc.uploadedAt || doc.createdAt, 'Unknown')}</span>
+                          {doc.category && <span>Category: {doc.category}</span>}
+                          {doc.documentType && <span>Type: {doc.documentType}</span>}
+                          {doc.certificationDate && (
+                            <span>
+                              Certified: {formatDateTime(doc.certificationDate, 'Date not supplied')}
+                            </span>
+                          )}
+                        </div>
+                        {doc.url && (
+                          <div className="mt-4">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => window.open(doc.url, '_blank')}
+                              className="hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600"
+                            >
+                              <Eye className="w-4 h-4 mr-2" />
+                              View document
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+        <div className="p-6 border-b border-gray-200">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-bold text-gray-900">Document Reviews</h2>
+              <p className="text-sm text-gray-600 mt-1">Review and approve or reject uploaded documents</p>
+              {documentSource === 'fallback' && (
+                <p className="text-xs text-blue-600 mt-2">
+                  Showing pending uploads pulled directly from SME/SDP registration folders
+                  (scanning up to {MAX_USERS_FOR_PENDING_SCAN} users).
+                </p>
+              )}
+              {documentSource === 'queue' && (
+                <p className="text-xs text-gray-500 mt-2">
+                  Powered by the real-time PayFast document review queue.
+                </p>
+              )}
+            </div>
+            <div className="flex flex-col gap-3 min-w-[260px]">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Badge
+                  variant={documentSource === 'queue' ? 'success' : documentSource === 'fallback' ? 'warning' : 'outline'}
+                  size="sm"
+                >
+                  {documentSource === 'queue'
+                    ? 'Queue mode'
+                    : documentSource === 'fallback'
+                      ? 'User uploads'
+                      : 'Idle'}
+                </Badge>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => loadPendingDocumentsFromUsers()}
+                  disabled={scanningUserDocs}
+                  className="hover:bg-blue-50 hover:border-blue-300 hover:text-blue-700"
+                >
+                  Refresh pending uploads
+                </Button>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={documentReviewSearch}
+                    onChange={(e) => setDocumentReviewSearch(e.target.value)}
+                    placeholder="Filter by user, company or document..."
+                    className="w-full pl-10 pr-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
+                  />
+                </div>
+                <select
+                  value={documentReviewRole}
+                  onChange={(e) => setDocumentReviewRole(e.target.value as 'all' | 'SME' | 'SDP')}
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="all">All roles</option>
+                  <option value="SME">SME only</option>
+                  <option value="SDP">SDP only</option>
+                </select>
+              </div>
+            </div>
+          </div>
         </div>
         
         <div className="p-6">
+          {documentScanError && (
+            <div className="mb-4 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg p-3">
+              {documentScanError}
+            </div>
+          )}
           {loading.documents ? (
             <p className="text-center py-8 text-gray-500">Loading documents...</p>
-          ) : pendingDocuments.length === 0 ? (
+          ) : filteredPendingDocuments.length === 0 ? (
             <div className="text-center py-12">
               <FolderOpen className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-              <p className="text-gray-600">No pending documents to review</p>
+              <p className="text-gray-600">
+                {hasDocumentReviewFilters && pendingDocuments.length > 0
+                  ? 'No pending documents match your filters.'
+                  : documentSource === 'fallback'
+                  ? 'No pending documents found across the scanned user profiles.'
+                  : 'No pending documents to review'}
+              </p>
+              {hasDocumentReviewFilters && pendingDocuments.length > 0 && (
+                <p className="text-xs text-gray-500 mt-2">
+                  Clear the filters to see all {pendingDocuments.length} pending documents.
+                </p>
+              )}
+              {documentSource !== 'queue' && !hasDocumentReviewFilters && (
+                <p className="text-xs text-gray-500 mt-2">
+                  Need to re-check? Click "Refresh pending uploads" to rescan user folders.
+                </p>
+              )}
             </div>
           ) : (
             <div className="space-y-4">
-              {pendingDocuments.map((doc: any) => (
+              {filteredPendingDocuments.map((doc: any) => (
                 <div 
                   key={doc.id}
                   className="border rounded-lg p-4 hover:bg-gray-50 transition-colors"
@@ -4259,24 +5919,58 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                   setSelectedDocument(null);
                   setReviewComment('');
                 }}
+                disabled={documentActionLoading !== null}
               >
                 Cancel
               </Button>
               <Button
                 variant="outline"
-                onClick={handleRejectDocument}
+                onClick={async () => {
+                  if (!reviewComment.trim()) {
+                    alert('Please provide a reason for rejection');
+                    return;
+                  }
+                  const success = await handleRejectDocument();
+                  if (success) {
+                    // Modal will be closed by handleRejectDocument
+                  }
+                }}
                 className="bg-red-50 border-red-300 text-red-700 hover:bg-red-100"
-                disabled={!reviewComment.trim()}
+                disabled={!reviewComment.trim() || documentActionLoading !== null}
               >
+                {documentActionLoading === `reject-${selectedDocument?.id}` ? (
+                  <>
+                    <div className="w-4 h-4 mr-2 border-2 border-red-700 border-t-transparent rounded-full animate-spin"></div>
+                    Rejecting...
+                  </>
+                ) : (
+                  <>
                 <XCircle className="w-4 h-4 mr-2" />
                 Reject
+                  </>
+                )}
               </Button>
               <Button
-                onClick={handleApproveDocument}
-                className="bg-green-600 hover:bg-green-700"
+                onClick={async () => {
+                  const success = await handleApproveDocument();
+                  if (success) {
+                    // Modal will be closed by handleApproveDocument
+                  }
+                }}
+                className="bg-green-600 hover:bg-green-700 text-white"
+                disabled={documentActionLoading !== null}
               >
+                {documentActionLoading === `approve-${selectedDocument?.id}` ? (
+                  <>
+                    <div className="w-4 h-4 mr-2 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    Approving...
+                  </>
+                ) : (
+                  <>
                 <CheckCircle className="w-4 h-4 mr-2" />
                 Approve
+                  </>
+                )}
               </Button>
             </div>
           </div>
@@ -4770,6 +6464,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           {activeView === 'documents' && renderDocuments()}
           {activeView === 'disputes' && renderDisputes()}
           {activeView === 'payments' && renderPayments()}
+          {activeView === 'blogs' && renderBlogs()}
           {activeView === 'smes' && renderSMEs()}
           {activeView === 'sdps' && renderSDPs()}
           {activeView === 'engagements' && renderEngagements()}
@@ -5378,56 +7073,93 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                       </div>
                     ) : (
                       <div className="space-y-3">
-                        {applicationDocuments.map((doc: any) => (
-                          <div 
-                            key={doc.id}
-                            className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow"
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center space-x-3 flex-1">
-                                <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-                                  <FileText className="w-5 h-5 text-blue-600" />
-                                </div>
-                                <div className="flex-1">
-                                  <h4 className="font-semibold text-gray-900">{doc.name || doc.fileName || 'Document'}</h4>
-                                  <div className="flex items-center space-x-4 mt-1 text-xs text-gray-500">
-                                    {doc.type && <span>Type: {doc.type}</span>}
-                                    {doc.uploadedAt && (
-                                      <span>
-                                        Uploaded: {doc.uploadedAt?.toDate 
-                                          ? doc.uploadedAt.toDate().toLocaleDateString('en-ZA')
-                                          : 'N/A'}
-                                      </span>
-                                    )}
-                                    {doc.size && <span>Size: {doc.size}</span>}
+                        {applicationDocuments.map((doc: any) => {
+                          const approveLoading = documentActionLoading === `approve-${doc.id}`;
+                          const rejectLoading = documentActionLoading === `reject-${doc.id}`;
+                          return (
+                            <div 
+                              key={doc.id}
+                              className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow"
+                            >
+                              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                                <div className="flex items-center space-x-3 flex-1">
+                                  <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
+                                    <FileText className="w-5 h-5 text-blue-600" />
                                   </div>
-                                  {doc.reviewStatus && (
-                                    <div className="mt-2">
-                                      <Badge 
-                                        variant={doc.reviewStatus === 'approved' ? 'success' : 
-                                                doc.reviewStatus === 'rejected' ? 'danger' : 'warning'}
-                                        size="sm"
-                                      >
-                                        {doc.reviewStatus}
-                                      </Badge>
+                                  <div className="flex-1">
+                                    <h4 className="font-semibold text-gray-900">{doc.name || doc.fileName || 'Document'}</h4>
+                                    <div className="flex flex-wrap gap-3 mt-1 text-xs text-gray-500">
+                                      {doc.type && <span>Type: {doc.type}</span>}
+                                      {doc.uploadedAt && (
+                                        <span>
+                                          Uploaded: {doc.uploadedAt?.toDate 
+                                            ? doc.uploadedAt.toDate().toLocaleDateString('en-ZA')
+                                            : 'N/A'}
+                                        </span>
+                                      )}
+                                      {doc.size && <span>Size: {doc.size}</span>}
                                     </div>
+                                    {doc.reviewStatus && (
+                                      <div className="mt-2">
+                                        <Badge 
+                                          variant={doc.reviewStatus === 'approved' ? 'success' : 
+                                                  doc.reviewStatus === 'rejected' ? 'danger' : 'warning'}
+                                          size="sm"
+                                        >
+                                          {doc.reviewStatus}
+                                        </Badge>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="flex items-center flex-wrap gap-2">
+                                  {doc.url && (
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => window.open(doc.url, '_blank')}
+                                      className="hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600"
+                                    >
+                                      <Eye className="w-4 h-4 mr-2" />
+                                      View
+                                    </Button>
                                   )}
+                                  <Button
+                                    size="sm"
+                                    onClick={() => handleApplicationDocumentDecision(doc, 'approve')}
+                                    disabled={approveLoading}
+                                    className="bg-green-600 hover:bg-green-700 disabled:opacity-60"
+                                  >
+                                    {approveLoading ? (
+                                      'Approving...'
+                                    ) : (
+                                      <>
+                                        <Check className="w-4 h-4 mr-2" />
+                                        Accept
+                                      </>
+                                    )}
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => handleApplicationDocumentDecision(doc, 'reject')}
+                                    disabled={rejectLoading}
+                                    className="border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-60"
+                                  >
+                                    {rejectLoading ? (
+                                      'Rejecting...'
+                                    ) : (
+                                      <>
+                                        <XIcon className="w-4 h-4 mr-2" />
+                                        Reject
+                                      </>
+                                    )}
+                                  </Button>
                                 </div>
                               </div>
-                              {doc.url && (
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => window.open(doc.url, '_blank')}
-                                  className="hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600"
-                                >
-                                  <Eye className="w-4 h-4 mr-2" />
-                                  View
-                                </Button>
-                              )}
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>

@@ -17,6 +17,10 @@ import { AboutPage } from './pages/AboutPage';
 import { LoginPage } from './pages/LoginPage';
 import { EditProfilePage } from './pages/EditProfilePage';
 import { RatingDebugPage } from './pages/RatingDebugPage';
+import { PaymentSuccessPage } from './pages/PaymentSuccessPage';
+import { PaymentCancelledPage } from './pages/PaymentCancelledPage';
+import { BlogsPage } from './pages/BlogsPage';
+import { BlogDetailPage } from './pages/BlogDetailPage';
 import { User } from './types';
 import { authService } from './firebase/auth';
 import { isFirebaseConfigured } from './firebase/config';
@@ -126,6 +130,8 @@ function App() {
         <Route path="/sdp-gateway" element={<SDPGateway />} />
         <Route path="/pricing" element={<PricingPage />} />
         <Route path="/about" element={<AboutPage />} />
+        <Route path="/blogs" element={<BlogsPage />} />
+        <Route path="/blogs/:slug" element={<BlogDetailPage />} />
         <Route path="/login" element={<LoginPage onLogin={handleLogin} />} />
         
         {/* Registration Routes */}
@@ -148,6 +154,10 @@ function App() {
         
         {/* Debug Page - Public route */}
         <Route path="/debug/rating" element={<RatingDebugPage />} />
+        
+        {/* Payment Handler Routes */}
+        <Route path="/payments/success" element={<PaymentSuccessPage />} />
+        <Route path="/payments/cancelled" element={<PaymentCancelledPage />} />
         
         {/* Protected Routes */}
         <Route 

@@ -163,6 +163,8 @@ interface BillingProfile {
   accountNumber: string;
   branchCode: string;
   accountType: string;
+  paypalSubscriptionId?: string;
+  paypalSubscriptionStatus?: string;
 }
 
 interface SDPDashboardProps {
@@ -255,7 +257,9 @@ export function SDPDashboard({ user }: SDPDashboardProps) {
     accountHolder: user.profile.name || '',
     accountNumber: '',
     branchCode: '',
-    accountType: ''
+    accountType: '',
+    paypalSubscriptionId: undefined,
+    paypalSubscriptionStatus: undefined
   };
   const [billingProfile, setBillingProfile] = useState<BillingProfile>(defaultBillingProfile);
   const [billingForm, setBillingForm] = useState<BillingProfile>(defaultBillingProfile);
@@ -297,7 +301,9 @@ export function SDPDashboard({ user }: SDPDashboardProps) {
       active: 'Active',
       pending: 'Pending',
       expired: 'Expired',
-      cancelled: 'Cancelled'
+      cancelled: 'Cancelled',
+      trial_expired: 'Trial Expired',
+      payment_due: 'Payment Due'
     };
     const activatedAt = user.profile.planActivatedAt ? new Date(user.profile.planActivatedAt) : null;
     const expiresAt = user.profile.planExpiresAt ? new Date(user.profile.planExpiresAt) : null;
@@ -381,7 +387,7 @@ export function SDPDashboard({ user }: SDPDashboardProps) {
             { label: 'Status', value: planInfo.statusLabel },
             { label: 'Reference', value: planInfo.reference || 'Pending' }
           ],
-          footnote: 'Subscription payments are processed securely via PayFast.'
+        footnote: 'Subscription payments are processed securely via PayPal.'
         }
       });
     }
@@ -6299,7 +6305,7 @@ export function SDPDashboard({ user }: SDPDashboardProps) {
           </div>
           <div className="bg-gray-50 rounded-2xl border border-gray-100 p-5 w-full lg:max-w-sm">
             <h4 className="font-semibold text-gray-900 mb-2">Payment Method</h4>
-            <p className="text-sm text-gray-600">PayFast • Secured EFT/Card</p>
+            <p className="text-sm text-gray-600">PayPal • Secured Card / EFT</p>
             <p className="text-xs text-gray-500 mt-1">
               Billing contact: <span className="font-semibold text-gray-800">{billingProfile.contactEmail}</span>
             </p>
@@ -6326,6 +6332,15 @@ export function SDPDashboard({ user }: SDPDashboardProps) {
                 Branch Code:{' '}
                 <span className="font-semibold text-gray-800">{billingProfile.branchCode || 'Not provided'}</span>
               </p>
+              {billingProfile.paypalSubscriptionStatus && (
+                <p>
+                  PayPal Subscription:{' '}
+                  <span className="font-semibold text-gray-800">
+                    {billingProfile.paypalSubscriptionStatus}
+                    {billingProfile.paypalSubscriptionId ? ` • ${billingProfile.paypalSubscriptionId}` : ''}
+                  </span>
+                </p>
+              )}
             </div>
             <div className="mt-4 space-y-2">
               <Button className="w-full" onClick={handleOpenBillingModal}>

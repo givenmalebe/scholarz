@@ -13,7 +13,12 @@ service cloud.firestore {
 
     // Users collection and profile docs
     match /users/{userId} {
-      allow read: if isSignedIn();
+      // Allow list queries for all (filtering happens via get rules)
+      allow list: if true;
+      // Allow get (single document read):
+      // - Authenticated users can read all users
+      // - Unauthenticated users can only read SME users (for Find SMEs page)
+      allow get: if isSignedIn() || resource.data.role == 'SME';
       allow create: if isUser(userId);
       // Allow user or admin to update most fields
       allow delete: if isUser(userId) || isAdmin();
@@ -238,6 +243,40 @@ service cloud.firestore {
         resource.data.userId == request.auth.uid ||
         isAdmin()
       );
+    }
+
+    // Blogs collection - public read for published blogs, admins can manage all
+    match /blogs/{blogId} {
+      // Allow get (single document read) for published blogs (no authentication required)
+      // Also allow authors and admins to read their own blogs or all blogs
+      allow get: if resource.data.status == 'published' || 
+                     (isSignedIn() && (
+                       resource.data.authorId == request.auth.uid ||
+                       isAdmin()
+                     ));
+      
+      // Allow list queries - everyone can list, but get rules filter the results
+      // This allows unauthenticated users to query for published blogs
+      allow list: if true;
+      
+      // Only admins can create blogs (or authors can create their own)
+      allow create: if isSignedIn() && (
+        request.resource.data.authorId == request.auth.uid ||
+        isAdmin()
+      );
+      
+      // Allow update if:
+      // 1. User is author or admin (can update anything)
+      // 2. Anyone signed in can update only the views and updatedAt fields (for view counting)
+      allow update: if isSignedIn() && (
+        resource.data.authorId == request.auth.uid ||
+        isAdmin() ||
+        // Allow anyone signed in to update only the views and updatedAt fields
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views', 'updatedAt']))
+      );
+      
+      // Only admin can delete
+      allow delete: if isAdmin();
     }
   }
 }

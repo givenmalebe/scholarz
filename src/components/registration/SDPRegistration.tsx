@@ -15,13 +15,13 @@ interface PlanDefinition {
   amount: number;
   billingType: 'trial' | 'subscription' | 'once_off';
   durationDays?: number;
-  payfastPlanId: string;
+  paypalPlanId: string;
   description: string;
 }
 
-interface PayfastResponseData {
-  paymentId: string;
-  paymentUrl?: string;
+interface PaypalResponseData {
+  orderId: string;
+  approvalUrl?: string;
   paymentStatus: string;
   amount: number;
   currency: string;
@@ -35,23 +35,23 @@ const SDP_PLAN_DETAILS: Record<SDPPlanKey, PlanDefinition> = {
     amount: 0,
     billingType: 'trial',
     durationDays: 30,
-    payfastPlanId: 'sdp-free',
+    paypalPlanId: 'sdp-free',
     description: '30-day trial to explore Scholarz'
   },
   monthly: {
     label: 'SDP Monthly',
-    amount: 149,
+    amount: 299,
     billingType: 'subscription',
     durationDays: 30,
-    payfastPlanId: 'sdp-monthly',
-    description: 'Introductory offer for the first 3 months'
+    paypalPlanId: 'sdp-monthly',
+    description: 'Monthly subscription with full access'
   },
   annual: {
     label: 'SDP Annual',
-    amount: 2499,
+    amount: 2399,
     billingType: 'subscription',
     durationDays: 365,
-    payfastPlanId: 'sdp-annual',
+    paypalPlanId: 'sdp-annual',
     description: 'Annual membership with savings'
   }
 };
@@ -276,35 +276,55 @@ export function SDPRegistration() {
     }
 
     try {
-      const initiatePayfast = httpsCallable(functions, 'initiatePayfastPayment');
-      const response = await initiatePayfast({
+      const initiatePaypal = httpsCallable(functions, 'initiatePaypalPayment');
+      // For free trials, set post-trial amount to monthly plan amount
+      const postTrialAmount = plan.billingType === 'trial' 
+        ? (SDP_PLAN_DETAILS.monthly.amount) 
+        : undefined;
+      
+      // Store payment details in localStorage for success/cancelled pages
+      // Note: currency is handled by backend based on PayPal environment (USD for sandbox, ZAR for production)
+      const paymentDetails = {
         amount: plan.amount,
-        currency: 'ZAR',
-        planId: plan.payfastPlanId,
+        // Don't set currency - let backend decide based on PayPal environment
+        planId: plan.paypalPlanId,
         billingType: plan.billingType,
         role: 'sdp',
         customer: {
           name: formData.companyName || `${formData.contactFirstName} ${formData.contactLastName}`.trim(),
           email: formData.contactEmail || formData.email
         },
-        returnUrl: typeof window !== 'undefined' ? `${window.location.origin}/payments/success` : undefined,
-        cancelUrl: typeof window !== 'undefined' ? `${window.location.origin}/payments/cancelled` : undefined,
         metadata: {
           organization: formData.companyName,
-          selectedPlan: plan.label
+          selectedPlan: plan.label,
+          planLabel: plan.label,
+          planDurationDays: plan.durationDays,
+          postTrialAmount: postTrialAmount
         }
+      };
+      
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('pending_payment', JSON.stringify(paymentDetails));
+      }
+      
+      const response = await initiatePaypal({
+        ...paymentDetails,
+        returnUrl: typeof window !== 'undefined' ? `${window.location.origin}/payments/success` : undefined,
+        cancelUrl: typeof window !== 'undefined' ? `${window.location.origin}/payments/cancelled` : undefined
       });
 
-      const data = response.data as PayfastResponseData;
-      if (data.paymentUrl && plan.amount > 0 && typeof window !== 'undefined') {
-        window.open(data.paymentUrl, '_blank', 'noopener');
+      const data = response.data as PaypalResponseData;
+      // Always open approval URL for trials (even if amount is 0) to set up payment method
+      // Also open for paid plans
+      if (data.approvalUrl && typeof window !== 'undefined') {
+        window.open(data.approvalUrl, '_blank', 'noopener');
       }
 
       const expiresAt = plan.durationDays
         ? computeExpiryDate(plan.durationDays)
         : normalizeFirestoreTimestamp(data.expiresAt);
 
-      const reference = data.paymentId || `PAY-${Date.now()}`;
+      const reference = data.orderId || `PAYPAL-${Date.now()}`;
 
       setPaymentReceipt({
         amount: plan.amount === 0 ? 'R0' : formatAmount(plan.amount),
@@ -313,9 +333,16 @@ export function SDPRegistration() {
       });
       setPaymentConfirmed(true);
       clearFieldError('payment');
-    } catch (payfastError: any) {
-      console.error('PayFast initialization error:', payfastError);
-      setError('Unable to start PayFast checkout. Please try again once PayFast credentials are configured.');
+    } catch (paypalError: any) {
+      console.error('PayPal initialization error:', paypalError);
+      const errorMessage = paypalError?.message || paypalError?.code || 'Unknown error';
+      if (errorMessage.includes('credentials') || errorMessage.includes('failed-precondition')) {
+        setError('PayPal is not configured. Please contact support or try again later.');
+      } else if (errorMessage.includes('plan')) {
+        setError('Unable to set up payment plan. Please try again or contact support.');
+      } else {
+        setError(`Unable to start PayPal checkout: ${errorMessage}. Please try again.`);
+      }
     } finally {
       setPaymentProcessing(false);
     }
@@ -1657,7 +1684,9 @@ export function SDPRegistration() {
                 <h4 className="text-lg font-bold text-gray-900 mb-2">
                   {formData.paymentPlan === 'free' ? 'Free Trial' : formData.paymentPlan === 'monthly' ? 'Monthly Plan' : 'Annual Plan'} Selected
                 </h4>
-                <p className="text-gray-700">Complete payment below to finish your registration.</p>
+                <p className="text-gray-700">
+                  Complete the PayPal subscription below so your trial seamlessly converts to a paid plan.
+                </p>
               </div>
             )}
 
@@ -1678,7 +1707,7 @@ export function SDPRegistration() {
                     </h4>
                     <p className="text-sm text-gray-600">
                       {formData.paymentPlan === 'free'
-                        ? 'Requires confirmation even though no payment is due.'
+                        ? 'Start the PayPal free-trial subscription (card required) so billing resumes automatically after 30 days.'
                         : 'Secure your plan to unlock full platform access.'}
                     </p>
                   </div>
@@ -1687,8 +1716,8 @@ export function SDPRegistration() {
                       {formData.paymentPlan === 'free'
                         ? 'R0'
                         : formData.paymentPlan === 'monthly'
-                        ? 'R149'
-                        : 'R2,499'}
+                        ? 'R299'
+                        : 'R2,399'}
                     </p>
                     <p className="text-xs text-gray-500">
                       {formData.paymentPlan === 'free'
@@ -1701,7 +1730,7 @@ export function SDPRegistration() {
                 </div>
 
                 <p className="text-xs text-gray-500">
-                  Payments are processed securely via PayFast. Free trials generate a R0 invoice so that we can track the 30-day timer before your access expires.
+                  Payments are processed securely via PayPal. Free trials still capture your billing agreement so we can auto-debit when the trial ends.
                 </p>
 
                 {paymentReceipt && paymentConfirmed ? (
@@ -1726,11 +1755,11 @@ export function SDPRegistration() {
                       {paymentProcessing
                         ? 'Processing...'
                         : formData.paymentPlan === 'free'
-                        ? 'Start 30-Day Free Trial'
+                        ? 'Start PayPal Free Trial'
                         : 'Pay & Activate Plan'}
                     </Button>
                     <p className="text-xs text-gray-600">
-                      Clicking this button records your payment and activates your plan.
+                      You'll approve the subscription on PayPal. Trials capture your card so billing resumes automatically after 30 days.
                     </p>
                   </div>
                 )}

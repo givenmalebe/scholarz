@@ -15,9 +15,21 @@ export function SearchInterface({ smes, onSMESelect }: SearchInterfaceProps) {
   const [filteredSMEs, setFilteredSMEs] = useState<SME[]>(smes);
   const [showFilters, setShowFilters] = useState(false);
 
-  const roles = ['Facilitator', 'Assessor', 'Moderator', 'Consultant'];
-  const sectors = ['Manufacturing', 'Services', 'Mining', 'Healthcare', 'Education', 'Technology', 'Finance'];
-  const locations = ['Johannesburg, Gauteng', 'Cape Town, Western Cape', 'Durban, KwaZulu-Natal', 'Pretoria, Gauteng'];
+  // Extract unique values from real SME data for filters
+  const roles = Array.from(
+    new Set(
+      smes.flatMap(sme => sme.roles || (sme.role ? [sme.role] : []))
+    )
+  ).sort();
+
+  const sectors = Array.from(
+    new Set(smes.flatMap(sme => sme.sectors || []))
+  ).sort();
+
+  const locations = Array.from(
+    new Set(smes.map(sme => sme.location).filter(Boolean))
+  ).sort();
+
   const availabilityOptions = ['Available', 'Busy', 'Offline', 'Away'];
 
   useEffect(() => {

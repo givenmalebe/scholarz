@@ -3,6 +3,7 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { ArrowLeft, CheckCircle, AlertCircle } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
+import { PayPalButton } from '../ui/PayPalButton';
 import { authService } from '../../firebase/auth';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { collection, addDoc, Timestamp } from 'firebase/firestore';
@@ -194,7 +195,7 @@ interface SMEPlanDefinition {
   amount: number;
   billingType: 'trial' | 'subscription' | 'once_off';
   durationDays?: number;
-  payfastPlanId: string;
+  paypalPlanId: string;
   description: string;
 }
 
@@ -204,9 +205,9 @@ interface PaymentReceiptInfo {
   expiresAt?: string;
 }
 
-interface PayfastResponseData {
-  paymentId: string;
-  paymentUrl?: string;
+interface PaypalResponseData {
+  orderId: string;
+  approvalUrl?: string;
   paymentStatus: string;
   amount: number;
   currency: string;
@@ -220,7 +221,7 @@ const SME_PLAN_DETAILS: Record<SMEPlanKey, SMEPlanDefinition> = {
     amount: 0,
     billingType: 'trial',
     durationDays: 30,
-    payfastPlanId: 'sme-free',
+    paypalPlanId: 'sme-free',
     description: '30-day access to get started'
   },
   monthly: {
@@ -228,7 +229,7 @@ const SME_PLAN_DETAILS: Record<SMEPlanKey, SMEPlanDefinition> = {
     amount: 99,
     billingType: 'subscription',
     durationDays: 30,
-    payfastPlanId: 'sme-monthly',
+    paypalPlanId: 'sme-monthly',
     description: 'Flexible month-to-month access'
   },
   annual: {
@@ -236,7 +237,7 @@ const SME_PLAN_DETAILS: Record<SMEPlanKey, SMEPlanDefinition> = {
     amount: 999,
     billingType: 'subscription',
     durationDays: 365,
-    payfastPlanId: 'sme-annual',
+    paypalPlanId: 'sme-annual',
     description: 'Best value annual plan'
   }
 };
@@ -342,29 +343,49 @@ const normalizeFirestoreTimestamp = (value: any): string | undefined => {
     }
 
     try {
-      const initiatePayfast = httpsCallable(functions, 'initiatePayfastPayment');
-      const response = await initiatePayfast({
+      const initiatePaypal = httpsCallable(functions, 'initiatePaypalPayment');
+      // For free trials, set post-trial amount to monthly plan amount
+      const postTrialAmount = plan.billingType === 'trial' 
+        ? (SME_PLAN_DETAILS.monthly.amount) 
+        : undefined;
+      
+      // Store payment details in localStorage for success/cancelled pages
+      // Note: currency is handled by backend based on PayPal environment (USD for sandbox, ZAR for production)
+      const paymentDetails = {
         amount: plan.amount,
-        currency: 'ZAR',
-        planId: plan.payfastPlanId,
+        // Don't set currency - let backend decide based on PayPal environment
+        planId: plan.paypalPlanId,
         billingType: plan.billingType,
         role: 'sme',
         customer: {
           name: `${formData.firstName} ${formData.lastName}`.trim(),
           email: formData.email
         },
-        returnUrl: typeof window !== 'undefined' ? `${window.location.origin}/payments/success` : undefined,
-        cancelUrl: typeof window !== 'undefined' ? `${window.location.origin}/payments/cancelled` : undefined,
         metadata: {
           planName: plan.label,
-          userEmail: formData.email
+          planLabel: plan.label,
+          userEmail: formData.email,
+          planDurationDays: plan.durationDays,
+          postTrialAmount: postTrialAmount
         }
+      };
+      
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('pending_payment', JSON.stringify(paymentDetails));
+      }
+      
+      const response = await initiatePaypal({
+        ...paymentDetails,
+        returnUrl: typeof window !== 'undefined' ? `${window.location.origin}/payments/success` : undefined,
+        cancelUrl: typeof window !== 'undefined' ? `${window.location.origin}/payments/cancelled` : undefined
       });
 
-      const data = response.data as PayfastResponseData;
+      const data = response.data as PaypalResponseData;
 
-      if (data.paymentUrl && plan.amount > 0 && typeof window !== 'undefined') {
-        window.open(data.paymentUrl, '_blank', 'noopener');
+      // Always open approval URL for trials (even if amount is 0) to set up payment method
+      // Also open for paid plans
+      if (data.approvalUrl && typeof window !== 'undefined') {
+        window.open(data.approvalUrl, '_blank', 'noopener');
       }
 
       const expiresAt = plan.durationDays
@@ -373,14 +394,21 @@ const normalizeFirestoreTimestamp = (value: any): string | undefined => {
 
       setPaymentReceipt({
         amount: plan.amount === 0 ? 'R0' : formatAmount(plan.amount),
-        reference: data.paymentId || `PAY-${Date.now()}`,
+        reference: data.orderId || `PAYPAL-${Date.now()}`,
         expiresAt
       });
       setPaymentConfirmed(true);
       clearFieldError('payment');
-    } catch (payfastError: any) {
-      console.error('PayFast initialization error (SME):', payfastError);
-      setError('Unable to start PayFast checkout. Please try again once PayFast credentials are configured.');
+    } catch (paypalError: any) {
+      console.error('PayPal initialization error (SME):', paypalError);
+      const errorMessage = paypalError?.message || paypalError?.code || 'Unknown error';
+      if (errorMessage.includes('credentials') || errorMessage.includes('failed-precondition')) {
+        setError('PayPal is not configured. Please contact support or try again later.');
+      } else if (errorMessage.includes('plan')) {
+        setError('Unable to set up payment plan. Please try again or contact support.');
+      } else {
+        setError(`Unable to start PayPal checkout: ${errorMessage}. Please try again.`);
+      }
     } finally {
       setPaymentProcessing(false);
     }
@@ -662,7 +690,7 @@ const normalizeFirestoreTimestamp = (value: any): string | undefined => {
       return;
     }
     if (!paymentConfirmed) {
-      setError('Please complete the PayFast payment step before finishing your registration.');
+      setError('Please complete the PayPal payment step before finishing your registration.');
       highlightSection('step7', ['payment']);
         return;
       }
@@ -2550,7 +2578,7 @@ const normalizeFirestoreTimestamp = (value: any): string | undefined => {
               <div className="bg-gradient-to-r from-green-50 to-blue-50 border-2 border-green-200 rounded-xl p-5 text-center">
                 <CheckCircle className="w-10 h-10 text-green-600 mx-auto mb-2" />
                 <p className="text-sm text-green-900">
-                  You selected the <strong className="capitalize">{formData.paymentPlan}</strong> plan. Complete the PayFast step below to activate your account.
+                  You selected the <strong className="capitalize">{formData.paymentPlan}</strong> plan. Complete the PayPal subscription step below so trials convert automatically when the 30 days end.
                 </p>
               </div>
             )}
@@ -2572,8 +2600,8 @@ const normalizeFirestoreTimestamp = (value: any): string | undefined => {
                     </h4>
                     <p className="text-sm text-gray-600">
                       {formData.paymentPlan === 'free'
-                        ? 'Generates a R0 PayFast invoice so we can track your trial expiry.'
-                        : 'Launch PayFast checkout to activate your plan.'}
+                        ? 'Start a PayPal free-trial subscription (card required) so billing resumes automatically on day 31.'
+                        : 'Launch PayPal checkout to activate your subscription.'}
                     </p>
                   </div>
                   <div className="text-right">
@@ -2595,7 +2623,7 @@ const normalizeFirestoreTimestamp = (value: any): string | undefined => {
                 </div>
 
                 <p className="text-xs text-gray-500">
-                  Payments are processed securely via PayFast. Even free trials need confirmation so the platform can enforce reminder timers.
+                  Payments are processed securely via PayPal. Even free trials require a subscription so we can auto-debit when the trial ends.
                 </p>
 
                 {paymentReceipt && paymentConfirmed ? (
@@ -2611,20 +2639,47 @@ const normalizeFirestoreTimestamp = (value: any): string | undefined => {
                     </p>
                   </div>
                 ) : (
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-                    <Button
-                      onClick={handlePaymentConfirmation}
-                      disabled={paymentProcessing}
-                      className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700"
-                    >
-                      {paymentProcessing
-                        ? 'Processing...'
-                        : formData.paymentPlan === 'free'
-                        ? 'Generate R0 Trial Invoice'
-                        : 'Launch PayFast Checkout'}
-                    </Button>
+                  <div className="space-y-3">
+                    {formData.paymentPlan && (() => {
+                      const plan = SME_PLAN_DETAILS[formData.paymentPlan as keyof typeof SME_PLAN_DETAILS];
+                      // For free trials, determine post-trial amount (default to monthly)
+                      // The backend will use this to set up the subscription correctly
+                      const postTrialAmount = plan.billingType === 'trial' 
+                        ? SME_PLAN_DETAILS.monthly.amount // Default to monthly after trial
+                        : undefined;
+                      
+                      return (
+                        <PayPalButton
+                          amount={plan.amount}
+                          planId={plan.paypalPlanId}
+                          billingType={plan.billingType}
+                          role="sme"
+                          customer={{
+                            name: `${formData.firstName} ${formData.lastName}`.trim(),
+                            email: formData.email
+                          }}
+                          metadata={postTrialAmount ? { postTrialAmount } : undefined}
+                          onSuccess={(subscriptionId, orderId) => {
+                            setPaymentReceipt({
+                              amount: plan.amount === 0 ? 'R0' : formatAmount(plan.amount),
+                              reference: orderId || subscriptionId,
+                              expiresAt: plan.durationDays
+                                ? computeExpiryDate(plan.durationDays)
+                                : undefined
+                            });
+                            setPaymentConfirmed(true);
+                            clearFieldError('payment');
+                          }}
+                          onError={(error) => {
+                            setError(`Payment error: ${error}`);
+                            setFieldErrors((prev) => ({ ...prev, payment: error }));
+                          }}
+                          label={formData.paymentPlan === 'free' ? 'Start Free Trial' : 'Subscribe Now'}
+                        />
+                      );
+                    })()}
                     <p className="text-xs text-gray-600">
-                      You will be redirected to PayFast (or see a confirmation message) once the payment step is complete.
+                      Enter your card details directly. No PayPal account required. Trials capture your billing agreement so charges resume automatically after 30 days.
                     </p>
                   </div>
                 )}

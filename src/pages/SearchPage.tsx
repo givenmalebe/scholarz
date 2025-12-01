@@ -5,6 +5,8 @@ import { SearchInterface } from '../components/search/SearchInterface';
 import { SME, User } from '../types';
 import { Badge } from '../components/ui/Badge';
 import { DollarSign } from 'lucide-react';
+import { db, isFirebaseConfigured } from '../firebase/config';
+import { collection, getDocs, query, where, onSnapshot } from 'firebase/firestore';
 
 interface SearchPageProps {
   user?: User | null;
@@ -17,18 +19,111 @@ export function SearchPage({ user }: SearchPageProps) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Load mock data
-    fetch('/data/mock-data.json')
-      .then(response => response.json())
-      .then(data => {
-        setSMEs(data.smes);
-        setLoading(false);
-      })
-      .catch(error => {
-        console.error('Error loading SME data:', error);
-        setLoading(false);
-      });
+    loadSMEs();
+    
+    // Return cleanup function for real-time listener
+    return () => {
+      // Cleanup will be handled by onSnapshot unsubscribe
+    };
   }, []);
+
+  const loadSMEs = () => {
+    if (!isFirebaseConfigured()) {
+      console.warn('Firebase not configured');
+      setSMEs([]);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    const usersRef = collection(db, 'users');
+    
+    // Query for users with SME role AND verified status
+    const q = query(
+      usersRef, 
+      where('role', '==', 'SME'),
+      where('verified', '==', true)
+    );
+    
+    console.log('Loading verified SMEs from Firestore...');
+    
+    // Use real-time listener for live updates
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        console.log(`Found ${snapshot.size} verified SME users in Firestore`);
+        const smesData: SME[] = [];
+        
+        snapshot.forEach((doc) => {
+          const userData = doc.data();
+          const profile = userData.profile || {};
+          
+          // Log for debugging
+          if (snapshot.size <= 5) {
+            console.log('User data:', { id: doc.id, email: userData.email, hasProfile: !!userData.profile, profileKeys: Object.keys(profile) });
+          }
+          
+          // Map user data to SME interface
+          const sme: SME = {
+            id: doc.id,
+            name: profile.name || userData.email || 'Unknown',
+            email: userData.email || '',
+            roles: profile.roles || (profile.role ? [profile.role] : []),
+            role: profile.role, // legacy support
+            specializations: profile.specializations || [],
+            sectors: profile.sectors || [],
+            location: profile.location || profile.locations?.[0] || 'Not specified',
+            locations: profile.locations || [],
+            experience: profile.experience || 'Not specified',
+            qualifications: profile.qualifications || [],
+            qualificationSpecs: profile.qualificationSpecs || {},
+            otherRole: profile.otherRole,
+            rates: profile.rates || {},
+            availability: profile.availability || 'Available',
+            rating: profile.rating || 0,
+            reviews: profile.reviews || 0,
+            verified: userData.verified || profile.verified || false,
+            profileImage: profile.profileImage || '/images/profile-1.jpg',
+            aboutMe: profile.aboutMe,
+            phone: profile.phone,
+            setaRegistration: profile.setaRegistration,
+            setaRegistrations: profile.setaRegistrations || {},
+            documentCertificationDate: profile.documentCertificationDate,
+            documentCertificationDates: profile.documentCertificationDates,
+            documentsCertificationConfirmed: profile.documentsCertificationConfirmed,
+            cv: profile.cv,
+            testimonials: profile.testimonials,
+            planType: userData.planType,
+            planStatus: userData.planStatus,
+            planActivatedAt: userData.planActivatedAt,
+            planExpiresAt: userData.planExpiresAt,
+            planReference: userData.planReference,
+            planRequiresPayment: userData.planRequiresPayment,
+            planExpiredAt: userData.planExpiredAt,
+            planIssue: userData.planIssue,
+            billingProfile: userData.billingProfile
+          };
+          
+          smesData.push(sme);
+        });
+        
+        console.log(`Mapped ${smesData.length} SMEs for display`);
+        setSMEs(smesData);
+        setLoading(false);
+      },
+      (error) => {
+        console.error('Error loading SME data:', error);
+        console.error('Error code:', error.code);
+        console.error('Error message:', error.message);
+        setLoading(false);
+      }
+    );
+    
+    // Return cleanup function
+    return () => {
+      unsubscribe();
+    };
+  };
 
   const handleSMESelect = (sme: SME) => {
     // Check if user is logged in

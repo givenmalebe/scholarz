@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { User, Mail, Phone, MapPin, Building2, Upload, Save, ArrowLeft, Camera, CheckCircle, AlertCircle } from 'lucide-react';
+import { User, Mail, Phone, MapPin, Building2, Upload, Save, ArrowLeft, Camera, CheckCircle, AlertCircle, Lock, Eye, EyeOff } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { doc, updateDoc, getDoc } from 'firebase/firestore';
 import { db, storage, isFirebaseConfigured, isStorageConfigured } from '../firebase/config';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { authService } from '../firebase/auth';
+import { updateProfile } from 'firebase/auth';
+import { auth } from '../firebase/config';
 
 interface EditProfilePageProps {
   user: {
@@ -23,6 +26,20 @@ export function EditProfilePage({ user }: EditProfilePageProps) {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [profileImage, setProfileImage] = useState<File | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  
+  // Password change state
+  const [showPasswordSection, setShowPasswordSection] = useState(false);
+  const [passwordData, setPasswordData] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: ''
+  });
+  const [showPasswords, setShowPasswords] = useState({
+    current: false,
+    new: false,
+    confirm: false
+  });
+  const [passwordLoading, setPasswordLoading] = useState(false);
   
   // Form data - dynamically based on role
   const [formData, setFormData] = useState<any>({});
@@ -117,13 +134,29 @@ export function EditProfilePage({ user }: EditProfilePageProps) {
       // Upload profile image if changed
       if (profileImage && isFirebaseConfigured() && isStorageConfigured()) {
         try {
-          const imageRef = ref(storage, `users/${user.id}/profile/${profileImage.name}`);
+          // Use consistent filename to overwrite previous image
+          // This ensures we always have one profile image per user
+          const fileExtension = profileImage.name.split('.').pop()?.toLowerCase() || 'jpg';
+          const consistentFileName = `profile.${fileExtension}`;
+          const imageRef = ref(storage, `users/${user.id}/profile/${consistentFileName}`);
+          
+          // Delete old profile image if it exists (optional - Firebase Storage will overwrite)
+          // But we'll keep the old one for now to avoid errors
+          
+          // Upload new image (overwrites existing file with same name)
           await uploadBytes(imageRef, profileImage);
           const imageUrl = await getDownloadURL(imageRef);
+          
+          // Store clean URL in Firestore (without cache busting)
+          // We'll add timestamp when displaying to force browser refresh
           updatedData.profileImage = imageUrl;
-        } catch (error) {
+          
+          console.log('Profile image uploaded successfully:', imageUrl);
+        } catch (error: any) {
           console.error('Error uploading image:', error);
-          setMessage({ type: 'error', text: 'Failed to upload profile image' });
+          setMessage({ type: 'error', text: `Failed to upload profile image: ${error.message || 'Unknown error'}` });
+          setLoading(false);
+          return;
         }
       } else if (profileImage) {
         // Fallback to localStorage for demo
@@ -137,14 +170,67 @@ export function EditProfilePage({ user }: EditProfilePageProps) {
       // Update Firestore
       if (isFirebaseConfigured()) {
         const userRef = doc(db, 'users', user.id);
-        await updateDoc(userRef, {
-          email: updatedData.email,
-          profile: updatedData
-        });
-
-        setMessage({ type: 'success', text: 'Profile updated successfully!' });
         
-        // Reload the page to reflect changes
+        // Ensure profileImage is properly included in the profile object
+        const profileUpdate = {
+          ...updatedData,
+          // Preserve existing profileImage if no new one was uploaded
+          profileImage: updatedData.profileImage || user.profile?.profileImage || '',
+          // Add image version timestamp to force browser refresh when image changes
+          profileImageUpdatedAt: updatedData.profileImage ? new Date().getTime() : (user.profile?.profileImageUpdatedAt || null)
+        };
+        
+        const updatePayload: any = {
+          email: updatedData.email,
+          updatedAt: new Date(),
+          profile: profileUpdate
+        };
+        
+        await updateDoc(userRef, updatePayload);
+
+        // Also update Firebase Auth display name and photo URL if changed
+        if (auth.currentUser) {
+          try {
+            const authUpdates: any = {};
+            
+            if (updatedData.name && updatedData.name !== user.profile?.name) {
+              authUpdates.displayName = updatedData.name;
+            }
+            
+            if (updatedData.profileImage && updatedData.profileImage !== user.profile?.profileImage) {
+              // Use clean URL for Firebase Auth photoURL
+              authUpdates.photoURL = updatedData.profileImage;
+            }
+            
+            if (Object.keys(authUpdates).length > 0) {
+              await updateProfile(auth.currentUser, authUpdates);
+              console.log('Firebase Auth profile updated');
+            }
+          } catch (authError: any) {
+            console.warn('Could not update auth profile:', authError);
+            // Non-critical, continue
+          }
+        }
+
+        // Update localStorage immediately for instant UI update
+        try {
+          const currentUserData = await getDoc(userRef);
+          if (currentUserData.exists()) {
+            const updatedUserData = {
+              id: user.id,
+              ...currentUserData.data(),
+              role: user.role,
+              verified: user.verified
+            };
+            localStorage.setItem('edulinker_user', JSON.stringify(updatedUserData));
+          }
+        } catch (localError) {
+          console.warn('Could not update localStorage:', localError);
+        }
+
+        setMessage({ type: 'success', text: 'Profile updated successfully! Refreshing...' });
+        
+        // Reload the page to reflect changes and refresh user state
         setTimeout(() => {
           window.location.reload();
         }, 1500);
@@ -165,6 +251,61 @@ export function EditProfilePage({ user }: EditProfilePageProps) {
       setMessage({ type: 'error', text: error.message || 'Failed to update profile' });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handlePasswordChange = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordLoading(true);
+    setMessage(null);
+
+    // Validation
+    if (!passwordData.currentPassword || !passwordData.newPassword || !passwordData.confirmPassword) {
+      setMessage({ type: 'error', text: 'Please fill in all password fields' });
+      setPasswordLoading(false);
+      return;
+    }
+
+    if (passwordData.newPassword.length < 6) {
+      setMessage({ type: 'error', text: 'New password must be at least 6 characters long' });
+      setPasswordLoading(false);
+      return;
+    }
+
+    if (passwordData.newPassword !== passwordData.confirmPassword) {
+      setMessage({ type: 'error', text: 'New password and confirm password do not match' });
+      setPasswordLoading(false);
+      return;
+    }
+
+    if (passwordData.currentPassword === passwordData.newPassword) {
+      setMessage({ type: 'error', text: 'New password must be different from current password' });
+      setPasswordLoading(false);
+      return;
+    }
+
+    try {
+      const result = await authService.changePassword(
+        passwordData.currentPassword,
+        passwordData.newPassword
+      );
+
+      if (result.error) {
+        setMessage({ type: 'error', text: result.error });
+      } else {
+        setMessage({ type: 'success', text: 'Password changed successfully!' });
+        setPasswordData({
+          currentPassword: '',
+          newPassword: '',
+          confirmPassword: ''
+        });
+        setShowPasswordSection(false);
+      }
+    } catch (error: any) {
+      console.error('Error changing password:', error);
+      setMessage({ type: 'error', text: error.message || 'Failed to change password' });
+    } finally {
+      setPasswordLoading(false);
     }
   };
 
@@ -509,6 +650,10 @@ export function EditProfilePage({ user }: EditProfilePageProps) {
                     src={previewImage}
                     alt="Profile"
                     className="w-32 h-32 rounded-full object-cover border-4 border-white shadow-lg"
+                    onError={(e) => {
+                      // Fallback if image fails to load
+                      (e.target as HTMLImageElement).src = '/images/profile-1.jpg';
+                    }}
                   />
                 ) : (
                   <div className="w-32 h-32 rounded-full bg-white/20 flex items-center justify-center border-4 border-white shadow-lg">
@@ -612,15 +757,145 @@ export function EditProfilePage({ user }: EditProfilePageProps) {
             </div>
 
             {/* Role-specific fields */}
-            <div className="border-b border-gray-200 pb-6">
-              <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
-                <Building2 className="w-5 h-5 mr-2 text-blue-600" />
-                {user.role} Specific Information
-              </h3>
-              
-              {user.role === 'SME' && renderSMEFields()}
-              {user.role === 'SDP' && renderSDPFields()}
-            </div>
+            {user.role !== 'Admin' && (
+              <div className="border-b border-gray-200 pb-6">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+                  <Building2 className="w-5 h-5 mr-2 text-blue-600" />
+                  {user.role} Specific Information
+                </h3>
+                
+                {user.role === 'SME' && renderSMEFields()}
+                {user.role === 'SDP' && renderSDPFields()}
+              </div>
+            )}
+
+            {/* Change Password Section - For Admin */}
+            {user.role === 'Admin' && (
+              <div className="border-b border-gray-200 pb-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center">
+                    <Lock className="w-5 h-5 mr-2 text-blue-600" />
+                    Change Password
+                  </h3>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setShowPasswordSection(!showPasswordSection);
+                      if (showPasswordSection) {
+                        setPasswordData({
+                          currentPassword: '',
+                          newPassword: '',
+                          confirmPassword: ''
+                        });
+                        setMessage(null);
+                      }
+                    }}
+                  >
+                    {showPasswordSection ? 'Cancel' : 'Change Password'}
+                  </Button>
+                </div>
+
+                {showPasswordSection && (
+                  <form onSubmit={handlePasswordChange} className="space-y-4 bg-gray-50 p-6 rounded-lg">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Current Password
+                      </label>
+                      <div className="relative">
+                        <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
+                        <input
+                          type={showPasswords.current ? 'text' : 'password'}
+                          value={passwordData.currentPassword}
+                          onChange={(e) => setPasswordData({ ...passwordData, currentPassword: e.target.value })}
+                          className="w-full pl-10 pr-10 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          placeholder="Enter current password"
+                          required
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPasswords({ ...showPasswords, current: !showPasswords.current })}
+                          className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                        >
+                          {showPasswords.current ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        New Password
+                      </label>
+                      <div className="relative">
+                        <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
+                        <input
+                          type={showPasswords.new ? 'text' : 'password'}
+                          value={passwordData.newPassword}
+                          onChange={(e) => setPasswordData({ ...passwordData, newPassword: e.target.value })}
+                          className="w-full pl-10 pr-10 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          placeholder="Enter new password (min. 6 characters)"
+                          required
+                          minLength={6}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPasswords({ ...showPasswords, new: !showPasswords.new })}
+                          className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                        >
+                          {showPasswords.new ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Confirm New Password
+                      </label>
+                      <div className="relative">
+                        <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
+                        <input
+                          type={showPasswords.confirm ? 'text' : 'password'}
+                          value={passwordData.confirmPassword}
+                          onChange={(e) => setPasswordData({ ...passwordData, confirmPassword: e.target.value })}
+                          className="w-full pl-10 pr-10 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          placeholder="Confirm new password"
+                          required
+                          minLength={6}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPasswords({ ...showPasswords, confirm: !showPasswords.confirm })}
+                          className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                        >
+                          {showPasswords.confirm ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end pt-2">
+                      <Button
+                        type="submit"
+                        disabled={passwordLoading}
+                        className="min-w-[150px]"
+                      >
+                        {passwordLoading ? (
+                          <>
+                            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                            Updating...
+                          </>
+                        ) : (
+                          <>
+                            <Lock className="w-4 h-4 mr-2" />
+                            Update Password
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            )}
 
             {/* Action Buttons */}
             <div className="flex items-center justify-end space-x-4 pt-6">

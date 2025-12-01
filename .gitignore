@@ -30,7 +30,6 @@ firestore-debug.log
 ui-debug.log
 *.firebaserc.bak
 
-# Environment variables
 .env
 .env.local
 .env.production

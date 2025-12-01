@@ -68,10 +68,17 @@ export interface SME {
   cv?: SMECV;
   testimonials?: Testimonial[];
   planType?: 'free' | 'monthly' | 'annual';
-  planStatus?: 'trial_active' | 'active' | 'pending';
+  planStatus?: 'trial_active' | 'active' | 'pending' | 'trial_expired' | 'payment_due' | 'expired' | 'cancelled';
   planActivatedAt?: string;
   planExpiresAt?: string;
   planReference?: string;
+  planRequiresPayment?: boolean;
+  planExpiredAt?: string;
+  planIssue?: string;
+  billingProfile?: {
+    paypalSubscriptionId?: string;
+    paypalSubscriptionStatus?: string;
+  };
 }
 
 export interface SDP {
@@ -95,10 +102,17 @@ export interface SDP {
   aboutUs: string;
   services?: string[];
   planType?: 'free' | 'monthly' | 'annual';
-  planStatus?: 'trial_active' | 'active' | 'pending';
+  planStatus?: 'trial_active' | 'active' | 'pending' | 'trial_expired' | 'payment_due' | 'expired' | 'cancelled';
   planActivatedAt?: string;
   planExpiresAt?: string;
   planReference?: string;
+  planRequiresPayment?: boolean;
+  planExpiredAt?: string;
+  planIssue?: string;
+  billingProfile?: {
+    paypalSubscriptionId?: string;
+    paypalSubscriptionStatus?: string;
+  };
 }
 
 export interface ProjectMilestone {
@@ -255,4 +269,23 @@ export interface ProjectApplication {
   rejectionReason?: string;
   invitedBy?: string;
   invitedAt?: any;
+}
+
+export interface Blog {
+  id: string;
+  title: string;
+  slug: string;
+  content: string;
+  excerpt?: string;
+  featuredImage?: string;
+  authorId: string;
+  authorName: string;
+  authorEmail: string;
+  status: 'draft' | 'published';
+  publishedAt?: any;
+  createdAt: any;
+  updatedAt: any;
+  tags?: string[];
+  category?: string;
+  views?: number;
 }

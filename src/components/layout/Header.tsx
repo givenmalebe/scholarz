@@ -18,6 +18,7 @@ export function Header({ user, onAuthClick, onLogout }: HeaderProps) {
     { href: '/search', label: 'Find SMEs' },
     { href: '/sme-gateway', label: 'Become an SME' },
     { href: '/sdp-gateway', label: 'Become an SDP' },
+    { href: '/blogs', label: 'Blogs' },
     { href: '/about', label: 'About' },
     { href: '/pricing', label: 'Pricing' },
   ];
@@ -81,9 +82,13 @@ export function Header({ user, onAuthClick, onLogout }: HeaderProps) {
                 >
                   {user?.profile?.profileImage ? (
                     <img
-                      src={user.profile.profileImage}
-                      alt={user.profile.name}
+                      src={`${user.profile.profileImage}${user.profile.profileImageUpdatedAt ? `?v=${user.profile.profileImageUpdatedAt}` : ''}`}
+                      alt={user.profile.name || 'Profile'}
                       className="w-8 h-8 rounded-full object-cover border-2 border-gray-200 hover:border-blue-500 transition-colors"
+                      onError={(e) => {
+                        // Fallback if image fails to load
+                        (e.target as HTMLImageElement).style.display = 'none';
+                      }}
                     />
                   ) : (
                     <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center hover:bg-blue-700 transition-colors">
